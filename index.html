@@ -3,13 +3,37 @@
 	Story by HTML5 UP
 	html5up.net | @ajlkn
 	Free for personal and commercial use under the CCA 3.0 license (html5up.net/license)
+
+	SEO/OGP/構造化データ・画像DL抑止（完全防止ではなく抑止）を追加済み
+	※ https://example.com/ は公開URLに置き換えてください
 -->
 <html lang="ja">
 	<head>
 		<title>石原菜々子 ピアノ教室｜高崎市片岡町の完全個人レッスン</title>
 		<meta charset="utf-8" />
-		<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<meta name="description" content="高崎市片岡町の石原菜々子 ピアノ教室。体験レッスン無料。お子さまから大人の方まで、基礎〜趣味・学校の伴奏・資格取得・音大受験・コンクールまで幅広く対応。目的とペースに合わせた完全個人レッスンで丁寧にサポートします。" />
+
+		<!-- SEO: canonical / robots -->
+		<link rel="canonical" href="https://example.com/" />
+		<meta name="robots" content="index,follow,max-image-preview:large" />
+
+		<!-- OGP / Twitter（SNS共有向け。URLは公開URLに置き換え） -->
+		<meta property="og:locale" content="ja_JP" />
+		<meta property="og:type" content="website" />
+		<meta property="og:site_name" content="石原菜々子 ピアノ教室" />
+		<meta property="og:title" content="石原菜々子 ピアノ教室｜高崎市片岡町の完全個人レッスン" />
+		<meta property="og:description" content="高崎市片岡町の完全個人レッスン。体験レッスン無料。基礎〜趣味・学校伴奏・資格取得・音大受験・コンクールまで対応。" />
+		<meta property="og:url" content="https://example.com/" />
+		<meta property="og:image" content="https://example.com/images/banner.jpg" />
+		<meta name="twitter:card" content="summary_large_image" />
+		<meta name="twitter:title" content="石原菜々子 ピアノ教室｜高崎市片岡町の完全個人レッスン" />
+		<meta name="twitter:description" content="高崎市片岡町の完全個人レッスン。体験レッスン無料。基礎〜趣味・学校伴奏・資格取得・音大受験・コンクールまで対応。" />
+		<meta name="twitter:image" content="https://example.com/images/banner.jpg" />
+
+		<!-- 任意: favicon（ファイルを用意できるなら） -->
+		<!-- <link rel="icon" href="favicon.ico" /> -->
+		<!-- <link rel="apple-touch-icon" href="apple-touch-icon.png" /> -->
 
 		<link rel="preconnect" href="https://fonts.googleapis.com" />
 		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -17,6 +41,27 @@
 
 		<link rel="stylesheet" href="assets/css/main.css" />
 		<noscript><link rel="stylesheet" href="assets/css/noscript.css" /></noscript>
+
+		<!-- 構造化データ（LocalBusiness）※公開情報と一致させてください -->
+		<script type="application/ld+json">
+		{
+		  "@context": "https://schema.org",
+		  "@type": "LocalBusiness",
+		  "name": "石原菜々子 ピアノ教室",
+		  "description": "高崎市片岡町の完全個人レッスン。体験レッスン無料。基礎〜趣味・学校の伴奏・資格取得・音大受験・コンクールまで対応。",
+		  "url": "https://example.com/",
+		  "telephone": "+81-50-1382-1090",
+		  "email": "piano.kyoshitsu.75@gmail.com",
+		  "address": {
+		    "@type": "PostalAddress",
+		    "addressCountry": "JP",
+		    "addressRegion": "群馬県",
+		    "addressLocality": "高崎市",
+		    "streetAddress": "片岡町2丁目"
+		  },
+		  "areaServed": "高崎市"
+		}
+		</script>
 
 		<style>
 			:root{
@@ -47,6 +92,16 @@
 			.banner.style1,
 			.spotlight.style1{
 				background-color: rgba(255, 255, 255, 0.72);
+			}
+
+			/* 画像DL抑止（完全防止ではなく抑止） */
+			img{
+				-webkit-user-drag: none;
+				user-select: none;
+				-webkit-touch-callout: none;
+			}
+			img.protect-img{
+				pointer-events: none; /* 右クリックや長押しの「画像として」メニューを出しにくくする */
 			}
 
 			/* Aboutスライドショー */
@@ -121,7 +176,14 @@
 				</p>
 			</div>
 			<div class="image">
-				<img src="images/banner.jpg" alt="ピアノ教室のイメージ" />
+				<img
+					class="protect-img"
+					src="images/banner.jpg"
+					alt="石原菜々子 ピアノ教室（ピアノ教室のイメージ）"
+					loading="eager"
+					fetchpriority="high"
+					draggable="false"
+				/>
 			</div>
 		</section>
 
@@ -136,9 +198,9 @@
 				</p>
 			</div>
 			<div class="image slideshow">
-				<img src="images/about_slide_01.jpg" class="slide active" alt="レッスンのイメージ1" />
-				<img src="images/about_slide_02.jpg" class="slide" alt="レッスンのイメージ2" />
-				<img src="images/about_slide_03.jpg" class="slide" alt="レッスンのイメージ3" />
+				<img src="images/about_slide_01.jpg" class="slide active protect-img" alt="レッスン風景（個人レッスンのイメージ）" loading="eager" draggable="false" />
+				<img src="images/about_slide_02.jpg" class="slide protect-img" alt="ピアノレッスンの様子（基礎練習のイメージ）" loading="lazy" draggable="false" />
+				<img src="images/about_slide_03.jpg" class="slide protect-img" alt="教室の雰囲気（ピアノ教室のイメージ）" loading="lazy" draggable="false" />
 			</div>
 		</section>
 
@@ -166,7 +228,7 @@
 				</p>
 			</div>
 			<div class="image">
-				<img src="images/spotlight02.jpg" alt="演奏のイメージ" />
+				<img class="protect-img" src="images/spotlight02.jpg" alt="ピアノ演奏のイメージ" loading="lazy" draggable="false" />
 			</div>
 		</section>
 
@@ -191,7 +253,7 @@
 				</ul>
 			</div>
 			<div class="image">
-				<img src="images/spotlight03.jpg" alt="教室の雰囲気" />
+				<img class="protect-img" src="images/spotlight03.jpg" alt="教室の雰囲気（教室イメージ）" loading="lazy" draggable="false" />
 			</div>
 		</section>
 
@@ -267,7 +329,7 @@
 				</ul>
 			</div>
 			<div class="image">
-				<img src="images/spotlight04.jpg" alt="講師のイメージ" />
+				<img class="protect-img" src="images/spotlight04.jpg" alt="講師のイメージ（ピアノ教室 講師紹介）" loading="lazy" draggable="false" />
 			</div>
 		</section>
 
@@ -331,16 +393,28 @@
 
 	<script>
 		document.addEventListener("DOMContentLoaded", function () {
+			/* Aboutスライドショー */
 			const slides = document.querySelectorAll("#about .slideshow .slide");
-			if (!slides.length) return;
+			if (slides.length) {
+				let current = 0;
+				setInterval(function () {
+					slides[current].classList.remove("active");
+					current = (current + 1) % slides.length;
+					slides[current].classList.add("active");
+				}, 4000);
+			}
 
-			let current = 0;
+			/* 画像DL抑止（完全防止ではなく抑止） */
+			document.addEventListener("contextmenu", function (e) {
+				const isImg = e.target && (e.target.tagName === "IMG" || e.target.closest(".image"));
+				if (isImg) e.preventDefault();
+			}, { capture: true });
 
-			setInterval(function () {
-				slides[current].classList.remove("active");
-				current = (current + 1) % slides.length;
-				slides[current].classList.add("active");
-			}, 4000); // 4秒ごとに切り替え
+			document.addEventListener("dragstart", function (e) {
+				if (e.target && e.target.tagName === "IMG") e.preventDefault();
+			}, { capture: true });
+
+			/* 画像の保存ショートカット等は完全には防げません（ブラウザ機能のため） */
 		});
 	</script>
 
