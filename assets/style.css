@@ -45,6 +45,8 @@ img.protect-img{ pointer-events: none; }
 
 /* ---------- 汎用 ---------- */
 h1, h2, h3{ font-family: var(--serif); font-weight: 600; letter-spacing: .06em; line-height: 1.5; }
+/* 1〜2文字だけの中途半端な行落ちを防ぐ（対応ブラウザのみ・段階的強化） */
+h1, h2, h3, p, dt, dd{ text-wrap: pretty; }
 h2{ font-size: clamp(1.7rem, 3.4vw, 2.4rem); margin: .4em 0 .8em; }
 h3{ font-size: 1.06rem; margin: 0 0 .3em; }
 .center{ text-align: center; }
@@ -149,7 +151,7 @@ h3{ font-size: 1.06rem; margin: 0 0 .3em; }
 	display: inline-flex; align-items: center; gap: .6em;
 	text-decoration: none; color: var(--ink);
 }
-.brand-name{ font-family: var(--serif); font-weight: 600; letter-spacing: .1em; font-size: 1.02rem; }
+.brand-name{ font-family: var(--serif); font-weight: 600; letter-spacing: .1em; font-size: 1.02rem; white-space: nowrap; }
 .global-nav{ display: flex; align-items: center; gap: clamp(1rem, 2.4vw, 2rem); }
 .global-nav a{
 	color: var(--ink); text-decoration: none; font-size: .88rem; letter-spacing: .14em;
@@ -292,6 +294,7 @@ h3{ font-size: 1.06rem; margin: 0 0 .3em; }
 .price-row dd{
 	margin: 0; font-family: var(--serif); font-weight: 600;
 	font-size: 1.7rem; color: var(--ink);
+	white-space: nowrap;
 }
 .price-row dd .yen{ font-size: .55em; margin-left: .15em; color: var(--ink-soft); }
 .price-chip{
@@ -412,15 +415,24 @@ h3{ font-size: 1.06rem; margin: 0 0 .3em; }
 		display: inline-block; border: 1px solid var(--rose); color: var(--rose);
 		text-decoration: none; border-radius: 999px; padding: .45em 1.2em;
 		font-size: .84rem; letter-spacing: .1em; background: rgba(255,253,249,.7);
+		white-space: nowrap; flex-shrink: 0;
 	}
 }
 @media (max-width: 620px){
 	body{ line-height: 1.95; }
 	.feature-grid{ grid-template-columns: 1fr; }
 	.mobile-cta{ display: flex; }
-	.brand-name{ font-size: .92rem; }
+	.brand-name{ font-size: .92rem; letter-spacing: .06em; }
+	.brand{ gap: .45em; }
+	.header-cta{ padding: .4em 1em; font-size: .8rem; letter-spacing: .06em; }
 	.hero h1{ font-size: clamp(2.3rem, 11vw, 2.9rem); }
-	.btn-big{ display: block; }
+	.btn-big{ display: block; white-space: nowrap; padding-left: .8em; padding-right: .8em; font-size: .92rem; letter-spacing: .08em; }
+	.price-row dd{ font-size: 1.5rem; }
 	.contact-actions{ flex-direction: column; }
 	.contact-actions .btn{ display: block; }
+}
+@media (max-width: 380px){
+	.brand-name{ font-size: .84rem; }
+	.header-cta{ font-size: .76rem; padding: .4em .85em; }
+	.btn-big{ font-size: .86rem; letter-spacing: .04em; }
 }
