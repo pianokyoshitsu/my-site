@@ -368,6 +368,77 @@ h3{ font-size: 1.06rem; margin: 0 0 .3em; }
 .contact-address a{ color: #e8b6c0; text-decoration: none; border-bottom: 1px solid rgba(232, 182, 192, .4); }
 .contact-address a:hover{ border-color: #e8b6c0; }
 
+/* ---------- Contact form ---------- */
+.contact-form{
+	background: var(--paper); color: var(--ink);
+	border-radius: 22px; padding: clamp(1.4rem, 4vw, 2.6rem) clamp(1.1rem, 4vw, 2.4rem);
+	margin: 2.4rem auto 0; text-align: left;
+	box-shadow: 0 30px 70px -30px rgba(0, 0, 0, .55);
+}
+.form-grid{ display: grid; grid-template-columns: 1fr 1fr; gap: 1.15rem 1.4rem; }
+.field{ display: flex; flex-direction: column; gap: .35rem; min-width: 0; margin: 0; padding: 0; border: 0; }
+.field-wide, .field-radio{ grid-column: 1 / -1; }
+.field > label, .field > legend{
+	font-size: .88rem; font-weight: 500; color: var(--ink); letter-spacing: .06em; line-height: 1.6;
+	padding: 0; display: flex; align-items: center; gap: .5em; flex-wrap: wrap;
+}
+.req, .opt{
+	font-size: .68rem; font-weight: 500; letter-spacing: .1em; line-height: 1;
+	padding: .3em .6em .28em; border-radius: 999px; white-space: nowrap;
+}
+.req{ background: var(--rose); color: #fff; }
+.opt{ background: var(--blush); color: var(--ink-soft); }
+.field input[type="text"], .field textarea{
+	font: inherit; font-size: 16px; line-height: 1.6; letter-spacing: .03em; color: var(--ink);
+	background: #fff; border: 1px solid var(--line); border-radius: 12px;
+	padding: .7em .95em; width: 100%; min-width: 0;
+	transition: border-color .2s ease, box-shadow .2s ease;
+}
+.field textarea{ resize: vertical; min-height: 7.5em; }
+.field input::placeholder, .field textarea::placeholder{ color: #b4a3a7; }
+.field input:focus, .field textarea:focus{
+	outline: none; border-color: var(--rose);
+	box-shadow: 0 0 0 4px rgba(168, 70, 92, .14);
+}
+.contact-form.was-validated .field input[type="text"]:invalid, .contact-form.was-validated .field textarea:invalid{ border-color: var(--rose-deep); background: #fff7f7; }
+.field-hint{ margin: 0; font-size: .78rem; color: var(--ink-soft); line-height: 1.7; }
+.radio-row{ display: flex; flex-wrap: wrap; gap: .6rem; }
+.radio{
+	position: relative; cursor: pointer; font-size: .9rem; letter-spacing: .04em;
+	border: 1px solid var(--line); border-radius: 999px; padding: .5em 1.15em; background: #fff;
+	transition: border-color .2s ease, background .2s ease, color .2s ease;
+}
+/* :has() 非対応ブラウザ（Safari 15.3以前など）では標準のラジオを見せる */
+.radio input{ position: static; opacity: 1; width: 1em; height: 1em; margin: 0 .35em 0 0; accent-color: var(--rose); vertical-align: -.1em; }
+.radio:focus-within{ box-shadow: 0 0 0 4px rgba(168, 70, 92, .18); }
+@supports selector(:has(*)){
+	.radio input{ position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; }
+	.radio:has(input:checked){ border-color: var(--rose); background: var(--rose); color: #fff; }
+	.radio:focus-within{ box-shadow: none; }
+	.radio:has(input:focus-visible){ box-shadow: 0 0 0 4px rgba(168, 70, 92, .18); }
+	.contact-form.was-validated .radio-row:has(input:invalid) .radio{ border-color: var(--rose-deep); }
+}
+.radio:focus-within{ outline: 2px solid var(--rose); outline-offset: 3px; }
+.hp-field{ position: absolute; left: -9999px; width: 1px; height: 1px; opacity: 0; }
+.form-actions{ text-align: center; margin: 1.8rem 0 .9rem; }
+.form-actions .btn{ border: 0; cursor: pointer; font: inherit; font-weight: 500; letter-spacing: .12em; }
+.form-actions .btn[disabled]{ opacity: .6; cursor: default; transform: none; }
+.form-privacy{ margin: 0; text-align: center; font-size: .78rem; color: var(--ink-soft); line-height: 1.7; }
+.form-error{
+	margin: 1.2rem 0 0; padding: .8em 1em; border-radius: 12px; font-size: .86rem; line-height: 1.8;
+	background: #fdeeee; color: #8e3a4d; border: 1px solid #f0c6cc;
+}
+.form-error a{ color: #8e3a4d; }
+.form-done{
+	background: var(--paper); color: var(--ink); border-radius: 22px;
+	padding: clamp(2rem, 5vw, 3rem) clamp(1.2rem, 4vw, 2.4rem); margin: 2.4rem auto 0;
+	box-shadow: 0 30px 70px -30px rgba(0, 0, 0, .55); outline: none;
+}
+.form-done .done-mark{ font-family: var(--serif); font-size: 2.2rem; color: var(--gold); margin: 0 0 .2em; line-height: 1; }
+.form-done h3{ font-size: 1.25rem; margin: 0 0 .6em; }
+.form-done p{ margin: 0; color: var(--ink-soft); font-size: .92rem; }
+.contact-alt{ margin: 2.6rem 0 -1.2rem; font-size: .84rem; letter-spacing: .12em; color: #cfa96f; }
+
 /* ---------- フッター ---------- */
 .site-footer{
 	background: #241a1d; color: #a99095;
@@ -430,6 +501,8 @@ h3{ font-size: 1.06rem; margin: 0 0 .3em; }
 	.price-row dd{ font-size: 1.5rem; }
 	.contact-actions{ flex-direction: column; }
 	.contact-actions .btn{ display: block; }
+	.form-grid{ grid-template-columns: 1fr; gap: 1rem; }
+	.form-actions .btn-big{ width: 100%; }
 }
 @media (max-width: 380px){
 	.brand-name{ font-size: .84rem; }
