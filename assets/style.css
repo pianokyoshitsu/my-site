@@ -38,6 +38,9 @@ body{
 img{ max-width: 100%; height: auto; display: block; }
 a{ color: var(--rose); }
 section{ scroll-margin-top: calc(var(--header-h) + 8px); }
+/* チラシのQR（#contactForm）から直接フォームへ着地させる：固定ヘッダーの下に出す */
+#contactForm{ scroll-margin-top: calc(var(--header-h) + 16px); }
+#contactForm:target{ opacity: 1; transform: none; transition: none; }
 
 /* 画像DL抑止（完全防止ではなく抑止） */
 img{ -webkit-user-drag: none; user-select: none; -webkit-touch-callout: none; }

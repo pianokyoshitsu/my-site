@@ -68,6 +68,35 @@
 		var submitBtn = document.getElementById("formSubmit");
 		var fallbackHtml = "お手数ですが、<a href=\"tel:05013821090\">お電話（050-1382-1090）</a>または<a href=\"mailto:piano.kyoshitsu.75@gmail.com\">メール</a>でご連絡ください。";
 
+		/* 流入元の計測：チラシのQR等（?utm_source=...）から来た人は、フォームの送信内容に「きっかけ」を自動で添える */
+		(function () {
+			var q = {};
+			location.search.replace(/^\?/, "").split("&").forEach(function (kv) {
+				if (!kv) return;
+				var i = kv.indexOf("=");
+				try {
+					var k = decodeURIComponent((i < 0 ? kv : kv.slice(0, i)).replace(/\+/g, " "));
+					var v = i < 0 ? "" : decodeURIComponent(kv.slice(i + 1).replace(/\+/g, " "));
+					q[k] = v.replace(/[\u0000-\u001F\u007F]/g, " ").trim().slice(0, 60);
+				} catch (e) { /* 壊れた%エンコードは無視（フォーム本体は止めない） */ }
+			});
+			var label = "";
+			if (q.utm_source === "flyer" || q.from === "flyer") {
+				var versions = { greeting: "ごあいさつ版", lesson: "レッスン案内版" };
+				var ver = q.utm_content ? (Object.prototype.hasOwnProperty.call(versions, q.utm_content) ? versions[q.utm_content] : q.utm_content) : "";
+				var parts = [ver, q.utm_campaign ? q.utm_campaign + "配布" : ""].filter(Boolean);
+				label = "チラシのQRコード" + (parts.length ? "（" + parts.join("・") + "）" : "");
+			} else if (q.utm_source) {
+				label = [q.utm_source, q.utm_medium, q.utm_campaign, q.utm_content].filter(Boolean).join(" / ");
+			}
+			if (!label) return;
+			var hidden = document.createElement("input");
+			hidden.type = "hidden";
+			hidden.name = "きっかけ";
+			hidden.value = label;
+			form.appendChild(hidden);
+		})();
+
 		var showDone = function () {
 			form.hidden = true;
 			done.hidden = false;
