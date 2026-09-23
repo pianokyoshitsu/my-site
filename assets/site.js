@@ -68,6 +68,28 @@
 		var submitBtn = document.getElementById("formSubmit");
 		var fallbackHtml = "お手数ですが、<a href=\"tel:05013821090\">お電話（050-1382-1090）</a>または<a href=\"mailto:piano.kyoshitsu.75@gmail.com\">メール</a>でご連絡ください。";
 
+		/* チラシのQR（#contactForm）から来たら、読み込み完了後に確実にフォームへ着地させる
+		   （ブラウザ標準のアンカー移動は、フォントや画像の読み込みで位置がずれたり効かなかったりするため） */
+		if (location.hash === "#contactForm") {
+			var landCancelled = false;
+			var cancelLanding = function () { landCancelled = true; };
+			["wheel", "touchstart", "keydown", "mousedown"].forEach(function (t) {
+				window.addEventListener(t, cancelLanding, { passive: true, once: true });
+			});
+			var landOnForm = function () {
+				/* 読み込み中に自分で操作した人・別の場所へ移動した人・送信完了表示中は動かさない */
+				if (landCancelled || location.hash !== "#contactForm" || form.hidden) return;
+				var offset = (header ? header.offsetHeight : 72) + 16;
+				var y = Math.max(0, form.getBoundingClientRect().top + window.pageYOffset - offset);
+				var root = document.documentElement;
+				var prev = root.style.scrollBehavior;
+				root.style.scrollBehavior = "auto"; /* CSSのなめらかスクロールを一時的に止めて即時に移動 */
+				window.scrollTo(0, y);
+				root.style.scrollBehavior = prev;
+			};
+			window.addEventListener("load", function () { setTimeout(landOnForm, 80); });
+		}
+
 		/* 流入元の計測：チラシのQR等（?utm_source=...）から来た人は、フォームの送信内容に「きっかけ」を自動で添える */
 		(function () {
 			var q = {};
