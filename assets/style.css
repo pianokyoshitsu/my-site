@@ -427,6 +427,8 @@ h3{ font-size: 1.06rem; margin: 0 0 .3em; }
 .form-actions .btn{ border: 0; cursor: pointer; font: inherit; font-weight: 500; letter-spacing: .12em; }
 .form-actions .btn[disabled]{ opacity: .6; cursor: default; transform: none; }
 .form-privacy{ margin: 0; text-align: center; font-size: .78rem; color: var(--ink-soft); line-height: 1.7; }
+/* 語の途中で折り返さない：文節ごとにまとめ、文節の間でだけ改行する */
+.form-privacy .ph{ display: inline-block; }
 .form-error{
 	margin: 1.2rem 0 0; padding: .8em 1em; border-radius: 12px; font-size: .86rem; line-height: 1.8;
 	background: #fdeeee; color: #8e3a4d; border: 1px solid #f0c6cc;
