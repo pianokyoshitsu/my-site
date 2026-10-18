@@ -14,8 +14,13 @@
  *  - 入力の決まりは最小限。迷惑送信らしきもの（隠し欄に入力あり）も捨てず、件名に印を付けて届ける
  *  - ログには受付番号・段階・エラーの種類だけを出す（入力内容やメールアドレスは出さない）
  *
- * 控えの確認（Cloudflare の D1「nanakopiano-contact」のコンソールで）：
- *   SELECT id, received_at, mail_status, mail_attempts, rescue_rounds FROM submissions WHERE mail_status <> 'sent';
+ * 見張り：https://nanakopiano.com/api/contact-health が {"ok":true,...} を返すか（毎朝 mail-reply-check ルーチンが見る）。
+ *   ok=false の内訳：unsent_over_30min（30分以上、送れていない・または送れたかを記録できていない）／gave_up（送り直しを打ち切った）／
+ *   rescue_stale（定期処理が30分以上、最後まで正常に終わっていない）
+ * 控えの確認と対応（Cloudflare の D1「nanakopiano-contact」のコンソールで）：
+ *   見る：SELECT id, received_at, mail_status, mail_attempts, rescue_rounds, mail_error FROM submissions WHERE mail_status <> 'sent';
+ *   原因を直したあと、その1件だけ送り直す：UPDATE submissions SET mail_status = 'failed', rescue_rounds = 0, lock_token = NULL, lock_until = NULL WHERE id = <番号>;
+ *   手で対応済みにする（教室に別の方法で伝えた等）：UPDATE submissions SET mail_status = 'resolved', lock_token = NULL, lock_until = NULL WHERE id = <番号>;
  */
 
 const TO = "piano.kyoshitsu.75@gmail.com";
@@ -59,6 +64,8 @@ const MAX_ROUNDS = FAST_ROUNDS + 720; /* その後30日間ぶん（1時間おき
 const SLOW_INTERVAL_MS = 55 * 60 * 1000;
 const RESCUE_BATCH = 10;
 const KEEP_DAYS = 400; /* 送信済みの控えの保存期間（約1年＋余裕） */
+const HEALTH_UNSENT_AFTER_MS = 30 * 60 * 1000; /* 健康確認：受付から30分たっても送れていなければ異常 */
+const HEALTH_RESCUE_STALE_MS = 30 * 60 * 1000; /* 健康確認：定期処理が30分以上動いていなければ異常 */
 
 /* 送り直しても同じ結果になるエラー（設定・中身の問題） */
 const NO_RETRY = new Set([
@@ -82,6 +89,10 @@ export default {
 	async fetch(request, env) {
 		const t = timing(env);
 		const deadline = Date.now() + t.deadlineMs;
+		/* 健康確認（/api/contact-health の Pages Function からだけ届く。件数と時刻だけで個人情報は返さない） */
+		if (request.method === "GET" && new URL(request.url).pathname === "/health") {
+			return health(env, t);
+		}
 		if (request.method !== "POST") {
 			return new Response("Method Not Allowed", { status: 405, headers: { Allow: "POST" } });
 		}
@@ -242,7 +253,7 @@ async function ensureTable(env) {
 			"received_at TEXT NOT NULL," +
 			"data TEXT NOT NULL," +
 			"suspicious INTEGER NOT NULL DEFAULT 0," +
-			"mail_status TEXT NOT NULL DEFAULT 'pending'," + /* pending / sent / failed / gave_up */
+			"mail_status TEXT NOT NULL DEFAULT 'pending'," + /* pending / sent / failed / gave_up / resolved（手で対応済み） */
 			"mail_attempts INTEGER NOT NULL DEFAULT 0," + /* メールAPIを呼んだ合計回数 */
 			"rescue_rounds INTEGER NOT NULL DEFAULT 0," + /* 定期処理が送り直しを担当した回数 */
 			"lock_token TEXT," +
@@ -252,6 +263,7 @@ async function ensureTable(env) {
 			"last_attempt_at TEXT," +
 			"mailed_at TEXT)"
 	).run();
+	await env.DB.prepare("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)").run();
 }
 
 /* 担当札つきで保存する（この処理が送るまで定期処理は触らない）。保存できなくてもメールは送る。失敗時は null */
@@ -278,13 +290,14 @@ async function saveRecord(env, t, receivedAt, fields, suspicious, token, until) 
 	}
 }
 
-/* 結果を記録して担当札を外す。札が自分のもののときだけ・送信済みを上書きしない */
+/* 結果を記録して担当札を外す。札が自分のもので、まだ pending/failed のときだけ（送信済み・手で対応済みは上書きしない）。
+   記録の命令を最後まで実行できたら true */
 async function finishRecord(env, t, id, token, result, deadline, giveUp) {
-	if (id == null) return;
+	if (id == null) return true;
 	const ms = Math.min(t.d1Ms, deadline - Date.now());
 	if (ms <= 0) {
 		log("finish", id, "NO_TIME"); /* 札の期限が切れたあと、定期処理が拾う */
-		return;
+		return false;
 	}
 	const now = new Date().toISOString();
 	const ok = result.ok ? 1 : 0;
@@ -298,14 +311,16 @@ async function finishRecord(env, t, id, token, result, deadline, giveUp) {
 					"message_id = COALESCE(?5, message_id), " +
 					"mailed_at = CASE WHEN ?1 = 1 THEN ?6 ELSE mailed_at END, " +
 					"last_attempt_at = ?6, lock_token = NULL, lock_until = NULL " +
-					"WHERE id = ?7 AND lock_token = ?8 AND mail_status <> 'sent'"
+					"WHERE id = ?7 AND lock_token = ?8 AND mail_status IN ('pending', 'failed')"
 			)
 				.bind(ok, MAX_ROUNDS, result.attempts, result.ok ? null : result.detail, result.messageId || null, now, id, token, giveUp ? 1 : 0)
 				.run(),
 			ms
 		);
+		return true;
 	} catch (e) {
 		log("finish", id, errCode(e));
+		return false;
 	}
 }
 
@@ -313,44 +328,75 @@ async function finishRecord(env, t, id, token, result, deadline, giveUp) {
 async function rescue(env, t) {
 	const nowMs = Date.now();
 	const now = new Date(nowMs).toISOString();
+
+	/* 控えの読み書きで1つでも失敗したら、この回は「正常に終わった」とは記録しない（健康確認で気づけるように） */
+	let dbTrouble = false;
+	await setMeta(env, "last_rescue_started_at", now);
+
+	/* 上限まで送り直したのに結果を記録できなかった行を gave_up に整理する（札が切れたものだけ・送信済みは触らない） */
+	try {
+		await env.DB.prepare(
+			"UPDATE submissions SET mail_status = 'gave_up', lock_token = NULL, lock_until = NULL " +
+				"WHERE mail_status IN ('pending', 'failed') AND rescue_rounds >= ?1 AND (lock_until IS NULL OR lock_until < ?2)"
+		)
+			.bind(MAX_ROUNDS, now)
+			.run();
+	} catch (e) {
+		dbTrouble = true;
+		log("tidy", null, errCode(e));
+	}
+
 	const { results } = await env.DB.prepare(
-		"SELECT id, received_at, data, suspicious FROM submissions " +
-			"WHERE mail_status IN ('pending', 'failed') AND received_at < ? AND rescue_rounds < ? " +
-			"AND (lock_until IS NULL OR lock_until < ?) " +
-			"AND (rescue_rounds < ? OR last_attempt_at IS NULL OR last_attempt_at < ?) " +
-			"ORDER BY rescue_rounds, id LIMIT ?"
+		"SELECT id, received_at, data, suspicious, rescue_rounds FROM submissions " +
+			"WHERE mail_status IN ('pending', 'failed') AND received_at < ?1 AND rescue_rounds < ?2 " +
+			"AND (lock_until IS NULL OR lock_until < ?3) " +
+			"AND (rescue_rounds < ?4 OR last_attempt_at IS NULL OR last_attempt_at < ?5) " +
+			"ORDER BY rescue_rounds, id LIMIT ?6"
 	)
 		.bind(new Date(nowMs - RESCUE_AFTER_MS).toISOString(), MAX_ROUNDS, now, FAST_ROUNDS, new Date(nowMs - SLOW_INTERVAL_MS).toISOString(), RESCUE_BATCH)
 		.all();
 
 	for (const row of results || []) {
-		/* 担当札を取る（同時に動いている別の処理が先に取っていたら何もしない）。回数はここで数える */
+		/* 担当札を取る。選んだときと同じ回数のままで、いまも送り直してよい条件（受付5分経過・上限未満・間隔）を
+		   満たすときだけ取れる＝同時に動いた別の処理が先に送った・記録した行は取らない。回数はここで数える */
 		const token = newToken();
-		const claimedAt = new Date().toISOString();
+		const claimMs = Date.now();
+		const claimedAt = new Date(claimMs).toISOString();
 		let claimed = false;
 		try {
 			const res = await withTimeout(
 				env.DB.prepare(
-					"UPDATE submissions SET lock_token = ?, lock_until = ?, rescue_rounds = rescue_rounds + 1, last_attempt_at = ? " +
-						"WHERE id = ? AND mail_status IN ('pending', 'failed') AND (lock_until IS NULL OR lock_until < ?)"
+					"UPDATE submissions SET lock_token = ?1, lock_until = ?2, rescue_rounds = rescue_rounds + 1, last_attempt_at = ?3 " +
+						"WHERE id = ?4 AND rescue_rounds = ?5 AND mail_status IN ('pending', 'failed') " +
+						"AND received_at < ?6 AND rescue_rounds < ?7 AND (lock_until IS NULL OR lock_until < ?3) " +
+						"AND (rescue_rounds < ?8 OR last_attempt_at IS NULL OR last_attempt_at < ?9)"
 				)
-					.bind(token, new Date(Date.now() + t.lockMs).toISOString(), claimedAt, row.id, claimedAt)
+					.bind(
+						token,
+						new Date(claimMs + t.lockMs).toISOString(),
+						claimedAt,
+						row.id,
+						row.rescue_rounds,
+						new Date(claimMs - RESCUE_AFTER_MS).toISOString(),
+						MAX_ROUNDS,
+						FAST_ROUNDS,
+						new Date(claimMs - SLOW_INTERVAL_MS).toISOString()
+					)
 					.run(),
 				t.d1Ms
 			);
 			claimed = !!(res && res.meta && res.meta.changes === 1);
 		} catch (e) {
+			dbTrouble = true;
 			log("claim", row.id, errCode(e));
 		}
 		if (!claimed) continue;
 
-		let fields;
-		try {
-			fields = JSON.parse(row.data);
-		} catch (e) {
-			/* 控えが壊れていて送れない＝送り直しても同じなので打ち切る（消さずに gave_up で残す） */
+		const fields = parseFields(row.data);
+		if (!fields) {
+			/* 控えが壊れていて送れない＝送り直しても同じなので打ち切る（消さずに gave_up で残す）。次の行へ進む */
 			log("rescue", row.id, "BAD_DATA");
-			await finishRecord(env, t, row.id, token, { ok: false, attempts: 0, code: "BAD_DATA", detail: "BAD_DATA" }, Date.now() + t.d1Ms, true);
+			if (!(await finishRecord(env, t, row.id, token, { ok: false, attempts: 0, code: "BAD_DATA", detail: "BAD_DATA" }, Date.now() + t.d1Ms, true))) dbTrouble = true;
 			continue;
 		}
 		const deadline = Date.now() + t.deadlineMs;
@@ -360,9 +406,72 @@ async function rescue(env, t) {
 			{ fields, receivedAt: new Date(row.received_at), id: row.id, suspicious: !!row.suspicious, resend: true },
 			deadline - t.d1Ms
 		);
-		await finishRecord(env, t, row.id, token, result, deadline);
+		if (!(await finishRecord(env, t, row.id, token, result, deadline))) dbTrouble = true;
 		if (result.ok) console.log("contact", "rescue", row.id, "SENT");
-		else log("rescue", row.id, "FAILED:" + result.code);
+		else log("rescue", row.id, "FAILED:" + result.code); /* メールが送れなかったこと自体は、記録できていれば正常な一巡 */
+	}
+
+	if (dbTrouble) {
+		log("rescue", null, "ROUND_INCOMPLETE");
+		return;
+	}
+	await setMeta(env, "last_rescue_ok_at", new Date().toISOString());
+}
+
+async function setMeta(env, key, value) {
+	try {
+		await env.DB.prepare("INSERT INTO meta (k, v) VALUES (?1, ?2) ON CONFLICT(k) DO UPDATE SET v = ?2").bind(key, value).run();
+	} catch (e) {
+		log("meta", null, errCode(e));
+	}
+}
+
+/* 控えの中身が [["項目","値"], ...] の形かを確かめる。違えば null */
+function parseFields(data) {
+	let v;
+	try {
+		v = JSON.parse(data);
+	} catch (e) {
+		return null;
+	}
+	const ok = Array.isArray(v) && v.length > 0 && v.every((p) => Array.isArray(p) && p.length === 2 && typeof p[0] === "string" && typeof p[1] === "string");
+	return ok ? v : null;
+}
+
+/* 健康確認：送れていない控え・打ち切った控え・定期処理の最後の実行時刻（件数と時刻だけ） */
+async function health(env, t) {
+	const nowMs = Date.now();
+	try {
+		return await withTimeout(
+			(async () => {
+				await ensureTable(env);
+				const unsent = await env.DB.prepare(
+					"SELECT COUNT(*) AS n FROM submissions WHERE mail_status IN ('pending', 'failed') AND received_at < ?1"
+				)
+					.bind(new Date(nowMs - HEALTH_UNSENT_AFTER_MS).toISOString())
+					.first();
+				const gaveUp = await env.DB.prepare("SELECT COUNT(*) AS n FROM submissions WHERE mail_status = 'gave_up'").first();
+				const beat = await env.DB.prepare("SELECT v FROM meta WHERE k = 'last_rescue_ok_at'").first();
+				const lastOkAt = beat && beat.v ? String(beat.v) : null;
+				const lastOkMs = lastOkAt ? Date.parse(lastOkAt) : NaN;
+				/* 記録なし・日時として読めない・古すぎる・未来すぎる（時計の狂い）は、どれも「止まっている」扱い */
+				const rescueStale = !Number.isFinite(lastOkMs) || lastOkMs < nowMs - HEALTH_RESCUE_STALE_MS || lastOkMs > nowMs + 5 * 60 * 1000;
+				const unsentN = unsent ? Number(unsent.n) : 0;
+				const gaveUpN = gaveUp ? Number(gaveUp.n) : 0;
+				return json(200, {
+					ok: unsentN === 0 && gaveUpN === 0 && !rescueStale,
+					unsent_over_30min: unsentN,
+					gave_up: gaveUpN,
+					last_rescue_ok_at: lastOkAt,
+					rescue_stale: rescueStale,
+					checked_at: new Date(nowMs).toISOString(),
+				});
+			})(),
+			t.d1Ms * 2
+		);
+	} catch (e) {
+		log("health", null, errCode(e));
+		return json(503, { ok: false, error: "DB_UNAVAILABLE", checked_at: new Date(nowMs).toISOString() });
 	}
 }
 
@@ -378,8 +487,9 @@ function buildMail(m, withReplyTo) {
 
 	const lines = [];
 	if (m.resend) {
-		lines.push("※このメールは自動の送り直しです。最初の送信のときにメールが送れなかったため、受付の控えから送り直しました。");
-		lines.push("　お客さまの画面には「送信できませんでした」と表示されたので、お電話やメールでも連絡が来ているかもしれません。");
+		lines.push("※このメールは自動の送り直しです。最初の送信が完了したことを控えで確認できなかったため、受付の控えから送り直しました。");
+		lines.push("　同じお問い合わせがすでに届いている場合があります。受付番号と内容を見比べてください。");
+		lines.push("　（最初の送信が失敗していた場合、お客さまの画面には「送信できませんでした」と出ているので、お電話やメールでも連絡が来ているかもしれません）");
 		lines.push("");
 	}
 	if (m.suspicious) {
@@ -427,7 +537,13 @@ async function sendMail(env, t, m, deadline) {
 		const remaining = deadline - Date.now();
 		if (remaining < 500) break;
 		attempts++;
-		const mail = buildMail(m, withReplyTo);
+		let mail;
+		try {
+			mail = buildMail(m, withReplyTo);
+		} catch (e) {
+			log("build", m.id, "BUILD_ERROR");
+			return { ok: false, attempts: attempts - 1, code: "BUILD_ERROR", detail: "BUILD_ERROR" };
+		}
 		try {
 			const res = await withTimeout(env.EMAIL.send(mail), Math.min(t.sendMs, remaining));
 			return { ok: true, attempts, messageId: res && res.messageId ? String(res.messageId) : null };

@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import worker from "../src/index.js";
 import * as pagesFn from "../../functions/api/contact.js";
+import * as healthFn from "../../functions/api/contact-health.js";
 
 const FAST = { deadlineMs: 1500, d1Ms: 200, sendMs: 300, backoffMs: 20, lockMs: 40 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -15,7 +16,7 @@ const RESCUE = { cron: "*/10 * * * *" };
 const CLEANUP = { cron: "0 0 1 * *" };
 
 /* ---------- D1 の代わり（SQLite） ---------- */
-function makeD1({ failAll = false, hang = false, failFinal = false } = {}) {
+function makeD1({ failAll = false, hang = false, failFinal = false, failSelect = false } = {}) {
 	const db = new DatabaseSync(":memory:");
 	const never = () => new Promise(() => {});
 	return {
@@ -44,6 +45,7 @@ function makeD1({ failAll = false, hang = false, failFinal = false } = {}) {
 				async all() {
 					if (hang) return never();
 					if (failAll) throw new Error("D1 down");
+					if (failSelect && sql.startsWith("SELECT id, received_at")) throw new Error("select failed");
 					return { results: db.prepare(sql).all(...args) };
 				},
 				async first() {
@@ -351,7 +353,7 @@ test("送り直し：失敗した控えを【再送】で届け、sent にする
 	await worker.scheduled(RESCUE, env(DB, EMAIL));
 	assert.equal(EMAIL.sent.length, 1);
 	assert.ok(EMAIL.sent[0].subject.startsWith("【再送】"));
-	assert.ok(EMAIL.sent[0].text.includes("自動の送り直し"));
+	assert.ok(EMAIL.sent[0].text.includes("自動の送り直し") && EMAIL.sent[0].text.includes("すでに届いている場合があります"));
 	assert.ok(EMAIL.sent[0].text.includes("テスト 花子"));
 	const [row] = DB.rows();
 	assert.equal(row.mail_status, "sent");
@@ -523,6 +525,144 @@ test("中継：受け口の設定が無い／例外 → 503（JSONなら JSON、
 
 test("中継：POST以外は405", async () => {
 	assert.equal(pagesFn.onRequest().status, 405);
+});
+
+test("送り直し：同時に動いた2本が同じ候補を持っていても、片方が記録したあとに取り直さない（失敗のとき）", async () => {
+	const DB = makeD1();
+	for (let i = 0; i < 2; i++) await worker.fetch(jsonReq({ ...SAMPLE, "お名前": "競合" + i }), env(DB, makeEmail(["E_INTERNAL_SERVER_ERROR", "E_INTERNAL_SERVER_ERROR", "E_INTERNAL_SERVER_ERROR"])));
+	DB.sql.prepare("UPDATE submissions SET received_at = ?").run(new Date(Date.now() - 10 * 60000).toISOString());
+	const plan = ["E_RECIPIENT_NOT_ALLOWED", "E_RECIPIENT_NOT_ALLOWED", "E_RECIPIENT_NOT_ALLOWED", "E_RECIPIENT_NOT_ALLOWED"];
+	plan.delayMs = 30;
+	const EMAIL = makeEmail(plan);
+	const e2 = { DB, EMAIL, CONTACT_TEST_TIMING: { ...FAST, lockMs: 5000 } };
+	await Promise.all([worker.scheduled(RESCUE, e2), worker.scheduled(RESCUE, e2)]);
+	assert.equal(EMAIL.calls, 2, "1件につき1回だけ試す");
+	assert.ok(DB.rows().every((r) => r.rescue_rounds === 1 && r.mail_status === "failed"));
+});
+
+test("送り直し：上限に達したのに結果を記録できなかった行は、札が切れたら gave_up に整理する", async () => {
+	const DB = makeD1();
+	await worker.fetch(jsonReq(SAMPLE), env(DB, makeEmail(["E_INTERNAL_SERVER_ERROR", "E_INTERNAL_SERVER_ERROR", "E_INTERNAL_SERVER_ERROR"])));
+	DB.sql
+		.prepare("UPDATE submissions SET mail_status = 'failed', rescue_rounds = 864, lock_token = 'old', lock_until = ?, received_at = ?")
+		.run(new Date(Date.now() - 60000).toISOString(), new Date(Date.now() - 40 * 86400000).toISOString());
+	const EMAIL = makeEmail();
+	await worker.scheduled(RESCUE, env(DB, EMAIL));
+	const [row] = DB.rows();
+	assert.equal(row.mail_status, "gave_up");
+	assert.equal(row.lock_token, null);
+	assert.equal(EMAIL.calls, 0);
+});
+
+test("送り直し：中身が null などの壊れた控えは gave_up にし、後ろの正常な控えはその回に送る", async () => {
+	const DB = makeD1();
+	for (let i = 0; i < 2; i++) await worker.fetch(jsonReq({ ...SAMPLE, "お名前": "後続" + i }), env(DB, makeEmail(["E_INTERNAL_SERVER_ERROR", "E_INTERNAL_SERVER_ERROR", "E_INTERNAL_SERVER_ERROR"])));
+	DB.sql.prepare("UPDATE submissions SET received_at = ?").run(new Date(Date.now() - 10 * 60000).toISOString());
+	DB.sql.prepare("UPDATE submissions SET data = 'null' WHERE id = 1").run();
+	const EMAIL = makeEmail();
+	await worker.scheduled(RESCUE, env(DB, EMAIL));
+	const rows = DB.rows();
+	assert.equal(rows[0].mail_status, "gave_up");
+	assert.equal(rows[1].mail_status, "sent");
+	assert.equal(EMAIL.sent.length, 1);
+});
+
+test("健康確認：正常なら ok=true、送れていない控え・打ち切り・定期処理の停止があれば ok=false", async () => {
+	const DB = makeD1();
+	const get = async () => (await worker.fetch(new Request("https://nanakopiano-contact.internal/health"), env(DB, makeEmail()))).json();
+	await worker.scheduled(RESCUE, env(DB, makeEmail())); /* 定期処理が動いた印をつける */
+	await worker.fetch(jsonReq(SAMPLE), env(DB, makeEmail()));
+	let h = await get();
+	assert.equal(h.ok, true, JSON.stringify(h));
+	assert.ok(!JSON.stringify(h).includes("テスト") && !JSON.stringify(h).includes("@"), "個人情報を返さない");
+	await worker.fetch(jsonReq(SAMPLE), env(DB, makeEmail(["E_RECIPIENT_NOT_ALLOWED"])));
+	DB.sql.prepare("UPDATE submissions SET received_at = ? WHERE id = 2").run(new Date(Date.now() - 40 * 60000).toISOString());
+	h = await get();
+	assert.equal(h.ok, false);
+	assert.equal(h.unsent_over_30min, 1);
+	DB.sql.prepare("UPDATE submissions SET mail_status = 'resolved' WHERE id = 2").run();
+	DB.sql.prepare("UPDATE meta SET v = ? WHERE k = 'last_rescue_ok_at'").run(new Date(Date.now() - 60 * 60000).toISOString());
+	h = await get();
+	assert.equal(h.ok, false);
+	assert.equal(h.rescue_stale, true);
+	assert.equal(h.unsent_over_30min, 0, "手で対応済み（resolved）は数えない");
+});
+
+test("健康確認：D1 が止まっていたら 503 で ok=false", async () => {
+	const res = await worker.fetch(new Request("https://nanakopiano-contact.internal/health"), env(makeD1({ failAll: true }), makeEmail()));
+	assert.equal(res.status, 503);
+	assert.equal((await res.json()).ok, false);
+});
+
+test("健康確認の中継：受け口に聞いてそのまま返す・設定が無ければ503", async () => {
+	const DB = makeD1();
+	await worker.scheduled(RESCUE, env(DB, makeEmail()));
+	const CONTACT = { fetch: (req) => worker.fetch(req, env(DB, makeEmail())) };
+	const r1 = await healthFn.onRequestGet({ env: { CONTACT } });
+	assert.equal(r1.status, 200);
+	assert.equal((await r1.json()).ok, true);
+	const r2 = await healthFn.onRequestGet({ env: {} });
+	assert.equal(r2.status, 503);
+	assert.equal(healthFn.onRequest().status, 405);
+});
+
+test("健康確認は GET /health だけ：GET /api/contact は405、POST /health は健康情報を返さない", async () => {
+	const r1 = await worker.fetch(new Request(URL_), env(makeD1(), makeEmail()));
+	assert.equal(r1.status, 405);
+	const r2 = await worker.fetch(
+		new Request("https://nanakopiano-contact.internal/health", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }),
+		env(makeD1(), makeEmail())
+	);
+	const body = await r2.text();
+	assert.ok(!body.includes("unsent_over_30min") && !body.includes("rescue_stale"));
+});
+
+test("手で対応済み（resolved）にしたあと、遅れて返った失敗でも成功でも resolved のまま・もう送らない", async () => {
+	for (const late of ["E_RECIPIENT_NOT_ALLOWED", "ok"]) {
+		const DB = makeD1();
+		await worker.fetch(jsonReq(SAMPLE), env(DB, makeEmail(["E_INTERNAL_SERVER_ERROR", "E_INTERNAL_SERVER_ERROR", "E_INTERNAL_SERVER_ERROR"])));
+		DB.sql.prepare("UPDATE submissions SET received_at = ?").run(new Date(Date.now() - 10 * 60000).toISOString());
+		const plan = [late];
+		plan.delayMs = 60;
+		const run = worker.scheduled(RESCUE, env(DB, makeEmail(plan)));
+		await sleep(20);
+		/* 送り直しの最中に、手で対応済みにする（冒頭コメントのSQLと同じ） */
+		DB.sql.prepare("UPDATE submissions SET mail_status = 'resolved', lock_token = NULL, lock_until = NULL").run();
+		await run;
+		assert.equal(DB.rows()[0].mail_status, "resolved", "遅れた結果=" + late);
+		const E = makeEmail();
+		await sleep(60);
+		await worker.scheduled(RESCUE, env(DB, E));
+		assert.equal(E.calls, 0, "resolved はもう送らない");
+	}
+});
+
+test("定期処理が途中で失敗した回は「正常に終わった時刻」を更新しない（健康確認で気づける）", async () => {
+	const DB = makeD1();
+	await worker.scheduled(RESCUE, env(DB, makeEmail()));
+	DB.sql.prepare("UPDATE meta SET v = ? WHERE k = 'last_rescue_ok_at'").run(new Date(Date.now() - 60 * 60000).toISOString());
+	const bad = makeD1({ failSelect: true });
+	bad.sql = DB.sql;
+	bad.prepare = ((orig) => (sql) => {
+		const st = orig(sql);
+		if (sql.startsWith("SELECT id, received_at")) st.all = async () => { throw new Error("select failed"); };
+		return st;
+	})(DB.prepare.bind(DB));
+	await assert.rejects(worker.scheduled(RESCUE, env(bad, makeEmail())));
+	const h = await (await worker.fetch(new Request("https://nanakopiano-contact.internal/health"), env(DB, makeEmail()))).json();
+	assert.equal(h.rescue_stale, true);
+	assert.equal(h.ok, false);
+});
+
+test("健康確認：正常終了の時刻が壊れている・未来すぎるときも rescue_stale", async () => {
+	const DB = makeD1();
+	await worker.scheduled(RESCUE, env(DB, makeEmail()));
+	const get = async () => (await worker.fetch(new Request("https://nanakopiano-contact.internal/health"), env(DB, makeEmail()))).json();
+	assert.equal((await get()).ok, true);
+	DB.sql.prepare("UPDATE meta SET v = 'not-a-date' WHERE k = 'last_rescue_ok_at'").run();
+	assert.equal((await get()).rescue_stale, true);
+	DB.sql.prepare("UPDATE meta SET v = ? WHERE k = 'last_rescue_ok_at'").run(new Date(Date.now() + 86400000).toISOString());
+	assert.equal((await get()).rescue_stale, true);
 });
 
 test("ログにお客さまのアドレスや入力内容が出ていない", async () => {
