@@ -1,0 +1,28 @@
+# 石原菜々子 ピアノ教室：お問い合わせフォームの受け口
+# GitHub の main に push すると Cloudflare（Workers Builds・ルート＝contact-worker）が自動で公開する。
+# 外から直接は呼べない（workers.dev を切ってある）。サイトの /api/contact（functions/api/contact.js）からだけ呼ばれる。
+name = "nanakopiano-contact"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+workers_dev = false
+preview_urls = false
+
+# 教室のGmail（Email Routing で確認済みの宛先）にだけ送れる
+[[send_email]]
+name = "EMAIL"
+destination_address = "piano.kyoshitsu.75@gmail.com"
+
+# お問い合わせの控え（メールが届かなかったときの保険）
+[[d1_databases]]
+binding = "DB"
+database_name = "nanakopiano-contact"
+database_id = "6b365674-82f9-41f0-827a-2afa92ebc38d"
+
+# 定期処理（src/index.js の RESCUE_CRON・CLEANUP_CRON と同じ文字列にすること）
+#  10分おき：メールが送れなかった控えを自動で送り直す
+#  毎月1日 9:00（日本時間）：保存期間を過ぎた送信済みの控えを消す
+[triggers]
+crons = ["*/10 * * * *", "0 0 1 * *"]
+
+[observability]
+enabled = true
