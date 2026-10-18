@@ -11,6 +11,10 @@
  *  - 送り直しは「担当札（lock_token）」を先に付けてから行う＝同じ控えを2つの処理が同時に送らない・
  *    送信済みの記録を後から失敗で上書きしない・回数は送る前に数える（記録の更新に失敗しても無限に送らない）
  *  - メールが送れなかったときは、お客さまに「送信できなかった」と正直に返す（画面に電話・メールの案内が出る）
+ *  - メールの送信は数秒かかることがある（Gmailが受け取るまで待つため）。時間切れは「失敗」ではない＝送り直さない
+ *    （2026-10-18 本番で、5秒で打ち切って送り直した結果「お客さまには失敗表示・教室には2通」になった）。
+ *    待てる時間（約9秒）を過ぎても終わらないときは、控えが保存できていれば「受け付けた」と返し、送信の結果は裏で
+ *    見届けて記録する（失敗なら定期処理が送り直す）。控えが無いときだけ「送信できなかった」と返す
  *  - 入力の決まりは最小限。迷惑送信らしきもの（隠し欄に入力あり）も捨てず、件名に印を付けて届ける
  *  - ログには受付番号・段階・エラーの種類だけを出す（入力内容やメールアドレスは出さない）
  *
@@ -49,9 +53,9 @@ const MAX_BODY_BYTES = 512 * 1024;
 const TIMING = {
 	deadlineMs: 11000, /* 1件の処理全体（読み取り〜最後の記録まで） */
 	d1Ms: 2000, /* 控えの保存・更新1回 */
-	sendMs: 5000, /* メール送信1回 */
+	settleMs: 25000, /* 時間内に終わらなかった送信を、返事のあと裏で待つ上限（Workers は返事のあと約30秒まで処理を続けられる） */
 	backoffMs: 600, /* 送り直しの間隔（回数×この値） */
-	lockMs: 90000, /* 担当札の有効期限（この間はほかの処理が触らない）。⚠️必ず deadlineMs より十分長くすること */
+	lockMs: 90000, /* 担当札の有効期限（この間はほかの処理が触らない）。⚠️必ず deadlineMs＋settleMs より十分長くすること */
 };
 const SEND_ATTEMPTS = 3;
 
@@ -86,7 +90,7 @@ const NO_RETRY = new Set([
 const REPLYTO_SUSPECT = new Set(["E_VALIDATION_ERROR", "E_FIELD_MISSING", "E_HEADER_VALUE_INVALID", "E_HEADER_VALUE_TOO_LONG"]);
 
 export default {
-	async fetch(request, env) {
+	async fetch(request, env, ctx) {
 		const t = timing(env);
 		const deadline = Date.now() + t.deadlineMs;
 		/* 健康確認（/api/contact-health の Pages Function からだけ届く。件数と時刻だけで個人情報は返さない） */
@@ -122,6 +126,17 @@ export default {
 		/* 最後の記録の時間を残しておく */
 		const id = await saveRecord(env, t, receivedAt, fields, suspicious, token, deadline - t.d1Ms);
 		const result = await sendMail(env, t, { fields, receivedAt, id, suspicious, resend: false }, deadline - t.d1Ms);
+
+		if (result.pending) {
+			/* 送信がまだ終わっていない（遅いだけのことが多い）。結果は返事のあと裏で見届けて記録する */
+			background(ctx, settleLater(env, t, id, token, result, "send"));
+			if (id != null) {
+				console.log("contact", "send", id, "ACCEPTED_PENDING");
+				return success(wantsJson, id); /* 控えがあるので、届かなくても定期処理が送り直す */
+			}
+			log("send", null, "PENDING_NO_RECORD");
+			return failure(wantsJson, 502, "送信できませんでした。"); /* 控えが無い＝保証できないので正直に返す */
+		}
 		await finishRecord(env, t, id, token, result, deadline);
 
 		if (!result.ok) {
@@ -131,7 +146,7 @@ export default {
 		return success(wantsJson, id);
 	},
 
-	async scheduled(event, env) {
+	async scheduled(event, env, ctx) {
 		const t = timing(env);
 		await ensureTable(env);
 		if (event && event.cron === CLEANUP_CRON) {
@@ -139,7 +154,7 @@ export default {
 			await env.DB.prepare("DELETE FROM submissions WHERE mail_status = 'sent' AND received_at < ?").bind(cutoff).run();
 			return;
 		}
-		await rescue(env, t);
+		await rescue(env, t, ctx);
 	},
 };
 
@@ -325,7 +340,7 @@ async function finishRecord(env, t, id, token, result, deadline, giveUp) {
 }
 
 /* 送れなかった控えを送り直す（10分おきに呼ばれる） */
-async function rescue(env, t) {
+async function rescue(env, t, ctx) {
 	const nowMs = Date.now();
 	const now = new Date(nowMs).toISOString();
 
@@ -406,6 +421,11 @@ async function rescue(env, t) {
 			{ fields, receivedAt: new Date(row.received_at), id: row.id, suspicious: !!row.suspicious, resend: true },
 			deadline - t.d1Ms
 		);
+		if (result.pending) {
+			/* 送信がまだ終わっていない。送り直さず、結果を裏で見届けて記録する（札はそのまま＝ほかの処理は触らない） */
+			background(ctx, settleLater(env, t, row.id, token, result, "rescue"));
+			continue;
+		}
 		if (!(await finishRecord(env, t, row.id, token, result, deadline))) dbTrouble = true;
 		if (result.ok) console.log("contact", "rescue", row.id, "SENT");
 		else log("rescue", row.id, "FAILED:" + result.code); /* メールが送れなかったこと自体は、記録できていれば正常な一巡 */
@@ -527,7 +547,8 @@ function formatJst(d) {
 	return j.getUTCFullYear() + "年" + (j.getUTCMonth() + 1) + "月" + j.getUTCDate() + "日 " + p(j.getUTCHours()) + ":" + p(j.getUTCMinutes());
 }
 
-/* 期限内で最大3回送る。返信先が原因らしいエラーなら、返信先を外して送り直す */
+/* 期限内で最大3回送る（送り直すのは、エラーがはっきり返ってきたときだけ）。返信先が原因らしいエラーなら返信先を外して送り直す。
+   期限内に送信が終わらなかったら、送り直さずに { pending: 送信中の処理 } を返す（時間切れは失敗ではない） */
 async function sendMail(env, t, m, deadline) {
 	let withReplyTo = true;
 	let code = "";
@@ -544,11 +565,23 @@ async function sendMail(env, t, m, deadline) {
 			log("build", m.id, "BUILD_ERROR");
 			return { ok: false, attempts: attempts - 1, code: "BUILD_ERROR", detail: "BUILD_ERROR" };
 		}
+		const startedMs = Date.now();
+		let sending;
 		try {
-			const res = await withTimeout(env.EMAIL.send(mail), Math.min(t.sendMs, remaining));
+			sending = Promise.resolve(env.EMAIL.send(mail));
+		} catch (e) {
+			sending = Promise.reject(e);
+		}
+		try {
+			const res = await withTimeout(sending, remaining);
+			console.log("contact", "send-ms", m.id == null ? "-" : m.id, Date.now() - startedMs);
 			return { ok: true, attempts, messageId: res && res.messageId ? String(res.messageId) : null };
 		} catch (e) {
 			code = errCode(e);
+			if (code === "TIMEOUT") {
+				log("send-attempt", m.id, "STILL_SENDING #" + attempts);
+				return { ok: false, pending: sending, startedMs, attempts, code: "PENDING", detail: "PENDING" };
+			}
 			detail = (code + ": " + ((e && e.message) || "")).slice(0, 300);
 			log("send-attempt", m.id, code + " #" + attempts);
 			if (mail.replyTo && REPLYTO_SUSPECT.has(code)) {
@@ -561,6 +594,32 @@ async function sendMail(env, t, m, deadline) {
 		}
 	}
 	return { ok: false, attempts, code: code || "NO_TIME", detail: detail || "NO_TIME" };
+}
+
+/* 時間内に終わらなかった送信の結果を、返事のあとで見届けて記録する */
+async function settleLater(env, t, id, token, r, stage) {
+	let final;
+	try {
+		const res = await withTimeout(r.pending, t.settleMs);
+		console.log("contact", stage + "-late-sent", id == null ? "-" : id, Date.now() - r.startedMs);
+		final = { ok: true, attempts: r.attempts, messageId: res && res.messageId ? String(res.messageId) : null };
+	} catch (e) {
+		const code = errCode(e);
+		if (code === "TIMEOUT") {
+			/* まだ終わらない。札の期限が切れたあと、定期処理が拾う（届いていれば二重になることがある＝取りこぼしよりまし） */
+			log(stage + "-late", id, "STILL_PENDING");
+			return;
+		}
+		log(stage + "-late", id, "FAILED:" + code);
+		final = { ok: false, attempts: r.attempts, code, detail: (code + ": " + ((e && e.message) || "")).slice(0, 300) };
+	}
+	await finishRecord(env, t, id, token, final, Date.now() + t.d1Ms);
+}
+
+/* 返事のあとも処理を続ける（Workers の waitUntil）。使えないとき（テスト等）は失敗を握りつぶすだけ */
+function background(ctx, promise) {
+	const p = Promise.resolve(promise).catch((e) => log("background", null, errCode(e)));
+	if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(p);
 }
 
 /* ---------- 共通 ---------- */

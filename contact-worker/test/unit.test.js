@@ -10,7 +10,7 @@ import worker from "../src/index.js";
 import * as pagesFn from "../../functions/api/contact.js";
 import * as healthFn from "../../functions/api/contact-health.js";
 
-const FAST = { deadlineMs: 1500, d1Ms: 200, sendMs: 300, backoffMs: 20, lockMs: 40 };
+const FAST = { deadlineMs: 1500, d1Ms: 200, backoffMs: 20, lockMs: 40, settleMs: 3000 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const RESCUE = { cron: "*/10 * * * *" };
 const CLEANUP = { cron: "0 0 1 * *" };
@@ -61,7 +61,7 @@ function makeD1({ failAll = false, hang = false, failFinal = false, failSelect =
 
 /* ---------- メール送信の偽物 ---------- */
 function makeEmail(plan = []) {
-	/* plan：呼ばれるたびの結果。"ok"／エラーコード／"hang"（返事が来ない）。足りない分は "ok" */
+	/* plan：呼ばれるたびの結果。"ok"／エラーコード／"hang"（返事が来ない）／"slow-ok:ミリ秒"／"slow-err:コード:ミリ秒"。足りない分は "ok" */
 	const sent = [];
 	const tried = [];
 	let calls = 0;
@@ -77,6 +77,18 @@ function makeEmail(plan = []) {
 			const step = plan[calls++] || "ok";
 			if (delayMs) await sleep(delayMs);
 			if (step === "hang") return new Promise(() => {});
+			if (step.startsWith("slow-ok:")) {
+				await sleep(Number(step.split(":")[1]));
+				sent.push(mail);
+				return { messageId: "msg-" + calls };
+			}
+			if (step.startsWith("slow-err:")) {
+				const [, code, ms] = step.split(":");
+				await sleep(Number(ms));
+				const e = new Error("simulated late " + code);
+				e.code = code;
+				throw e;
+			}
 			if (step !== "ok") {
 				const e = new Error("simulated " + step + " for parent@example.com");
 				e.code = step;
@@ -241,13 +253,68 @@ test("設定の問題（送り直しても無駄）は1回で止めて失敗を�
 	assert.equal(EMAIL.calls, 1);
 });
 
-test("メール送信の返事が来ない：期限内に失敗を返す（成功にしない）", async () => {
+test("メール送信が期限内に終わらない（控えあり）：送り直さず「受け付けた」と返し、控えは送信待ちのまま残る", async () => {
 	const DB = makeD1(), EMAIL = makeEmail(["hang", "hang", "hang"]);
 	const t0 = Date.now();
 	const res = await worker.fetch(jsonReq(SAMPLE), env(DB, EMAIL));
+	assert.equal(res.status, 200);
+	assert.equal((await res.json()).success, "true");
+	assert.ok(Date.now() - t0 < FAST.deadlineMs + 300, "期限内に返事");
+	assert.equal(EMAIL.calls, 1, "時間切れでは送り直さない（二重送信を防ぐ）");
+	const [row] = DB.rows();
+	assert.equal(row.mail_status, "pending");
+	assert.ok(row.lock_token, "札はそのまま＝定期処理は札が切れるまで触らない");
+});
+
+test("メール送信が期限内に終わらない（控えなし）：保証できないので失敗を返す", async () => {
+	const DB = makeD1({ failAll: true }), EMAIL = makeEmail(["hang"]);
+	const res = await worker.fetch(jsonReq(SAMPLE), env(DB, EMAIL));
 	assert.equal(res.status, 502);
-	assert.ok(Date.now() - t0 < FAST.deadlineMs + 800, "期限内に返事");
+	assert.equal(EMAIL.calls, 1);
+});
+
+test("遅いけれど届く送信（本番で起きた形）：お客さまには成功・教室には1通だけ・控えはあとで sent になる", async () => {
+	const DB = makeD1(), EMAIL = makeEmail(["slow-ok:2500"]);
+	const ctx = { list: [], waitUntil(p) { this.list.push(p); } };
+	const t0 = Date.now();
+	const res = await worker.fetch(jsonReq(SAMPLE), env(DB, EMAIL), ctx);
+	assert.equal(res.status, 200);
+	assert.ok(Date.now() - t0 < FAST.deadlineMs + 300);
+	assert.equal(DB.rows()[0].mail_status, "pending");
+	await Promise.all(ctx.list);
+	const [row] = DB.rows();
+	assert.equal(row.mail_status, "sent");
+	assert.equal(row.message_id, "msg-1");
+	assert.equal(row.lock_token, null);
+	assert.equal(EMAIL.calls, 1);
+	assert.equal(EMAIL.sent.length, 1, "教室に届くのは1通だけ");
+});
+
+test("遅れて失敗が返る送信：あとで failed になり、定期処理が送り直す", async () => {
+	const DB = makeD1(), EMAIL = makeEmail(["slow-err:E_DELIVERY_FAILED:2000"]);
+	const ctx = { list: [], waitUntil(p) { this.list.push(p); } };
+	const res = await worker.fetch(jsonReq(SAMPLE), env(DB, EMAIL), ctx);
+	assert.equal(res.status, 200);
+	await Promise.all(ctx.list);
 	assert.equal(DB.rows()[0].mail_status, "failed");
+	DB.sql.prepare("UPDATE submissions SET received_at = ?").run(new Date(Date.now() - 10 * 60000).toISOString());
+	const E2 = makeEmail();
+	await worker.scheduled(RESCUE, env(DB, E2));
+	assert.equal(E2.sent.length, 1);
+	assert.equal(DB.rows()[0].mail_status, "sent");
+});
+
+test("送り直し（定期処理）でも、遅い送信は送り直さず裏で見届けて sent にする", async () => {
+	const DB = makeD1();
+	await worker.fetch(jsonReq(SAMPLE), env(DB, makeEmail(["E_INTERNAL_SERVER_ERROR", "E_INTERNAL_SERVER_ERROR", "E_INTERNAL_SERVER_ERROR"])));
+	DB.sql.prepare("UPDATE submissions SET received_at = ?").run(new Date(Date.now() - 10 * 60000).toISOString());
+	const EMAIL = makeEmail(["slow-ok:2000"]);
+	const ctx = { list: [], waitUntil(p) { this.list.push(p); } };
+	await worker.scheduled(RESCUE, { DB, EMAIL, CONTACT_TEST_TIMING: { ...FAST, lockMs: 60000 } }, ctx);
+	assert.equal(EMAIL.calls, 1);
+	await Promise.all(ctx.list);
+	assert.equal(DB.rows()[0].mail_status, "sent");
+	assert.equal(EMAIL.sent.length, 1);
 });
 
 test("D1 の返事が来ない：控えは諦めてメールは届く・期限内に返事", async () => {
@@ -486,11 +553,14 @@ test("送信内容が途中で止まる：期限内に408で返す", async () =>
 	assert.ok(Date.now() - t0 < 1000);
 });
 
-test("全体の時間：メールが遅くても、最後の記録まで含めて期限内に返す", async () => {
-	const DB = makeD1(), EMAIL = makeEmail(["hang", "hang", "hang"]);
+test("全体の時間：はっきりした失敗が続いても、最後の記録まで含めて期限内に返す", async () => {
+	const plan = ["E_INTERNAL_SERVER_ERROR", "E_INTERNAL_SERVER_ERROR", "E_INTERNAL_SERVER_ERROR"];
+	plan.delayMs = 350;
+	const DB = makeD1(), EMAIL = makeEmail(plan);
 	const t0 = Date.now();
-	await worker.fetch(jsonReq(SAMPLE), env(DB, EMAIL));
+	const res = await worker.fetch(jsonReq(SAMPLE), env(DB, EMAIL));
 	assert.ok(Date.now() - t0 <= FAST.deadlineMs + 150, "所要 " + (Date.now() - t0) + "ms");
+	assert.equal(res.status, 502);
 	assert.equal(DB.rows()[0].mail_status, "failed", "最後の記録も書けている");
 });
 
