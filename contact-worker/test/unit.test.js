@@ -10,7 +10,7 @@ import worker from "../src/index.js";
 import * as pagesFn from "../../functions/api/contact.js";
 import * as healthFn from "../../functions/api/contact-health.js";
 
-const FAST = { deadlineMs: 1500, d1Ms: 200, backoffMs: 20, lockMs: 40, settleMs: 3000 };
+const FAST = { deadlineMs: 1500, d1Ms: 200, backoffMs: 20, lockMs: 40, settleMs: 3000, rescueSendMs: 1500 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const RESCUE = { cron: "*/10 * * * *" };
 const CLEANUP = { cron: "0 0 1 * *" };
@@ -77,6 +77,7 @@ function makeEmail(plan = []) {
 			const step = plan[calls++] || "ok";
 			if (delayMs) await sleep(delayMs);
 			if (step === "hang") return new Promise(() => {});
+			if (step === "nocode") throw new Error("socket closed for parent@example.com"); /* 種類の分からない例外 */
 			if (step.startsWith("slow-ok:")) {
 				await sleep(Number(step.split(":")[1]));
 				sent.push(mail);
@@ -304,15 +305,13 @@ test("遅れて失敗が返る送信：あとで failed になり、定期処理
 	assert.equal(DB.rows()[0].mail_status, "sent");
 });
 
-test("送り直し（定期処理）でも、遅い送信は送り直さず裏で見届けて sent にする", async () => {
+test("送り直し（定期処理）でも、遅い送信は送り直さない（1回だけ）", async () => {
 	const DB = makeD1();
 	await worker.fetch(jsonReq(SAMPLE), env(DB, makeEmail(["E_INTERNAL_SERVER_ERROR", "E_INTERNAL_SERVER_ERROR", "E_INTERNAL_SERVER_ERROR"])));
 	DB.sql.prepare("UPDATE submissions SET received_at = ?").run(new Date(Date.now() - 10 * 60000).toISOString());
-	const EMAIL = makeEmail(["slow-ok:2000"]);
-	const ctx = { list: [], waitUntil(p) { this.list.push(p); } };
-	await worker.scheduled(RESCUE, { DB, EMAIL, CONTACT_TEST_TIMING: { ...FAST, lockMs: 60000 } }, ctx);
+	const EMAIL = makeEmail(["slow-ok:1000"]);
+	await worker.scheduled(RESCUE, { DB, EMAIL, CONTACT_TEST_TIMING: { ...FAST, lockMs: 60000 } });
 	assert.equal(EMAIL.calls, 1);
-	await Promise.all(ctx.list);
 	assert.equal(DB.rows()[0].mail_status, "sent");
 	assert.equal(EMAIL.sent.length, 1);
 });
@@ -476,11 +475,13 @@ test("送り直し：最後の記録が失敗し続けても、回数は増え�
 	DB.sql.prepare("UPDATE submissions SET mail_status = 'failed', lock_token = NULL, lock_until = NULL, received_at = ?").run(new Date(Date.now() - 10 * 60000).toISOString());
 	const EMAIL = makeEmail();
 	await worker.scheduled(RESCUE, env(DB, EMAIL));
-	assert.equal(EMAIL.sent.length, 10, "1回目は10件");
-	await sleep(60); /* 担当札の期限切れを待つ */
-	await worker.scheduled(RESCUE, env(DB, EMAIL));
+	assert.equal(EMAIL.sent.length, 5, "1回目は5件（1回の上限）");
+	for (let k = 0; k < 2; k++) {
+		await sleep(60); /* 担当札の期限切れを待つ */
+		await worker.scheduled(RESCUE, env(DB, EMAIL));
+	}
 	const names = EMAIL.sent.map((m) => m.subject);
-	assert.ok(names.some((s) => s.includes("客10")), "11件目も2回目で拾われる");
+	assert.ok(names.some((s) => s.includes("客10")), "11件目も3回目までに拾われる（回数の少ない順）");
 	const rounds = DB.rows().map((r) => r.rescue_rounds);
 	assert.ok(rounds.every((n) => n >= 1), "全件の回数が増えている: " + rounds);
 	assert.equal(EMAIL.sent.length, rounds.reduce((a, b) => a + b, 0), "送った数＝数えた回数");
@@ -587,7 +588,10 @@ test("中継：受け口の設定が無い／例外 → 503（JSONなら JSON、
 		},
 	});
 	assert.equal(r2.status, 503);
-	assert.ok((await r2.text()).includes("050-1382-1090"));
+	const html2 = await r2.text();
+	assert.ok(html2.includes("050-1382-1090"));
+	assert.ok(html2.includes("届いている可能性があります"), "例外のときは失敗と断定しない");
+	assert.ok((await (await pagesFn.onRequestPost({ request: jsonReq(SAMPLE), env: {} })).json()).message === "送信できませんでした。", "受け口が無いときは送られていない");
 	const newLogs = logs.slice(before).join("\n");
 	assert.ok(newLogs.includes("NO_BINDING") && newLogs.includes("WORKER_EXCEPTION"));
 	assert.ok(!newLogs.includes("parent@example.com") && !newLogs.includes("花子"));
@@ -733,6 +737,56 @@ test("健康確認：正常終了の時刻が壊れている・未来すぎる�
 	assert.equal((await get()).rescue_stale, true);
 	DB.sql.prepare("UPDATE meta SET v = ? WHERE k = 'last_rescue_ok_at'").run(new Date(Date.now() + 86400000).toISOString());
 	assert.equal((await get()).rescue_stale, true);
+});
+
+test("種類の分からない例外（控えあり）：その場で送り直さず受け付け、控えは failed＝あとで定期処理が送る", async () => {
+	const DB = makeD1(), EMAIL = makeEmail(["nocode", "ok"]);
+	const res = await worker.fetch(jsonReq(SAMPLE), env(DB, EMAIL));
+	assert.equal(res.status, 200);
+	assert.equal(EMAIL.calls, 1, "その場では送り直さない");
+	assert.equal(DB.rows()[0].mail_status, "failed");
+	DB.sql.prepare("UPDATE submissions SET received_at = ?").run(new Date(Date.now() - 10 * 60000).toISOString());
+	const E2 = makeEmail();
+	await worker.scheduled(RESCUE, env(DB, E2));
+	assert.equal(E2.sent.length, 1);
+	assert.ok(E2.sent[0].subject.startsWith("【再送】"));
+});
+
+test("種類の分からない例外（控えなし）：「結果を確認できませんでした・届いている可能性」と返す", async () => {
+	const DB = makeD1({ failAll: true }), EMAIL = makeEmail(["nocode"]);
+	const res = await worker.fetch(jsonReq(SAMPLE), env(DB, EMAIL));
+	assert.equal(res.status, 502);
+	assert.equal(EMAIL.calls, 1);
+	assert.ok((await res.json()).message.includes("届いている可能性があります"));
+});
+
+test("1日の上限（E_DAILY_LIMIT_EXCEEDED）はその場で送り直さず失敗を返す", async () => {
+	const DB = makeD1(), EMAIL = makeEmail(["E_DAILY_LIMIT_EXCEEDED"]);
+	const res = await worker.fetch(jsonReq({ ...SAMPLE, "ご連絡先（電話番号またはメールアドレス）": "090" }), env(DB, EMAIL));
+	assert.equal(res.status, 502);
+	assert.equal(EMAIL.calls, 1);
+	assert.equal(DB.rows()[0].mail_status, "failed");
+});
+
+test("送り直し（定期処理）：時間のかかる送信もその場で見届けて sent にし、正常終了の時刻も更新する", async () => {
+	const DB = makeD1();
+	await worker.fetch(jsonReq(SAMPLE), env(DB, makeEmail(["E_INTERNAL_SERVER_ERROR", "E_INTERNAL_SERVER_ERROR", "E_INTERNAL_SERVER_ERROR"])));
+	DB.sql.prepare("UPDATE submissions SET received_at = ?").run(new Date(Date.now() - 10 * 60000).toISOString());
+	const EMAIL = makeEmail(["slow-ok:2000"]); /* rescueSendMs(1500) を超えるので、その場で見届ける側に回る */
+	await worker.scheduled(RESCUE, { DB, EMAIL, CONTACT_TEST_TIMING: { ...FAST, lockMs: 60000 } });
+	assert.equal(EMAIL.calls, 1);
+	assert.equal(DB.rows()[0].mail_status, "sent");
+	const ok = DB.sql.prepare("SELECT v FROM meta WHERE k = 'last_rescue_ok_at'").get();
+	assert.ok(ok && ok.v, "正常終了の時刻が入る");
+});
+
+test("送り直し（定期処理）：見届けた結果を記録できなかった回は、正常終了の時刻を更新しない", async () => {
+	const DB = makeD1({ failFinal: true });
+	await worker.fetch(jsonReq(SAMPLE), env(DB, makeEmail(["E_INTERNAL_SERVER_ERROR", "E_INTERNAL_SERVER_ERROR", "E_INTERNAL_SERVER_ERROR"])));
+	DB.sql.prepare("UPDATE submissions SET mail_status = 'failed', lock_token = NULL, lock_until = NULL, received_at = ?").run(new Date(Date.now() - 10 * 60000).toISOString());
+	await worker.scheduled(RESCUE, { DB, EMAIL: makeEmail(["slow-ok:2000"]), CONTACT_TEST_TIMING: { ...FAST, lockMs: 60000 } });
+	const ok = DB.sql.prepare("SELECT v FROM meta WHERE k = 'last_rescue_ok_at'").get();
+	assert.ok(!ok, "記録に失敗した回は正常終了にしない");
 });
 
 test("ログにお客さまのアドレスや入力内容が出ていない", async () => {

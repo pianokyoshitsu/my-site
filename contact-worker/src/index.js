@@ -14,7 +14,9 @@
  *  - メールの送信は数秒かかることがある（Gmailが受け取るまで待つため）。時間切れは「失敗」ではない＝送り直さない
  *    （2026-10-18 本番で、5秒で打ち切って送り直した結果「お客さまには失敗表示・教室には2通」になった）。
  *    待てる時間（約9秒）を過ぎても終わらないときは、控えが保存できていれば「受け付けた」と返し、送信の結果は裏で
- *    見届けて記録する（失敗なら定期処理が送り直す）。控えが無いときだけ「送信できなかった」と返す
+ *    見届けて記録する（失敗なら定期処理が送り直す）。控えが無いときは「結果を確認できなかった」と返す
+ *  - その場で送り直すのは「一時的な不調」とはっきり分かるエラーのときだけ（RETRYABLE）。種類の分からない例外は
+ *    結果不明として扱い、その場では送り直さない（控えがあれば定期処理が送り直す＝二重になることはある）
  *  - 入力の決まりは最小限。迷惑送信らしきもの（隠し欄に入力あり）も捨てず、件名に印を付けて届ける
  *  - ログには受付番号・段階・エラーの種類だけを出す（入力内容やメールアドレスは出さない）
  *
@@ -54,6 +56,7 @@ const TIMING = {
 	deadlineMs: 11000, /* 1件の処理全体（読み取り〜最後の記録まで） */
 	d1Ms: 2000, /* 控えの保存・更新1回 */
 	settleMs: 25000, /* 時間内に終わらなかった送信を、返事のあと裏で待つ上限（Workers は返事のあと約30秒まで処理を続けられる） */
+	rescueSendMs: 45000, /* 定期処理の送り直し1件で送信を待つ上限（定期処理は最大15分動けるので、返事の都合が無いぶん長く待つ） */
 	backoffMs: 600, /* 送り直しの間隔（回数×この値） */
 	lockMs: 90000, /* 担当札の有効期限（この間はほかの処理が触らない）。⚠️必ず deadlineMs＋settleMs より十分長くすること */
 };
@@ -66,13 +69,18 @@ const RESCUE_AFTER_MS = 5 * 60 * 1000; /* 受付から5分たっても送れて�
 const FAST_ROUNDS = 144; /* 最初の24時間ぶん（10分おき） */
 const MAX_ROUNDS = FAST_ROUNDS + 720; /* その後30日間ぶん（1時間おき）。超えたら gave_up として残す（消さない） */
 const SLOW_INTERVAL_MS = 55 * 60 * 1000;
-const RESCUE_BATCH = 10;
+const RESCUE_BATCH = 5; /* 1回の定期処理で送り直す件数（1件最大約70秒×5件＝次の回の前に終わる） */
 const KEEP_DAYS = 400; /* 送信済みの控えの保存期間（約1年＋余裕） */
 const HEALTH_UNSENT_AFTER_MS = 30 * 60 * 1000; /* 健康確認：受付から30分たっても送れていなければ異常 */
 const HEALTH_RESCUE_STALE_MS = 30 * 60 * 1000; /* 健康確認：定期処理が30分以上動いていなければ異常 */
 
 /* 送り直しても同じ結果になるエラー（設定・中身の問題） */
+/* その場で送り直してよいエラー（一時的な不調とはっきり分かるもの）。これ以外の種類の分からない例外は「結果不明」 */
+const RETRYABLE = new Set(["E_INTERNAL_SERVER_ERROR", "E_RATE_LIMIT_EXCEEDED", "E_DELIVERY_FAILED", "E_SERVICE_UNAVAILABLE", "E_TEMPORARILY_UNAVAILABLE"]);
+
+/* 送れなかったことがはっきりしているエラー（設定・中身の問題）。その場では送り直さない */
 const NO_RETRY = new Set([
+	"E_DAILY_LIMIT_EXCEEDED",
 	"E_VALIDATION_ERROR",
 	"E_FIELD_MISSING",
 	"E_CONTENT_TOO_LARGE",
@@ -127,15 +135,16 @@ export default {
 		const id = await saveRecord(env, t, receivedAt, fields, suspicious, token, deadline - t.d1Ms);
 		const result = await sendMail(env, t, { fields, receivedAt, id, suspicious, resend: false }, deadline - t.d1Ms);
 
-		if (result.pending) {
-			/* 送信がまだ終わっていない（遅いだけのことが多い）。結果は返事のあと裏で見届けて記録する */
-			background(ctx, settleLater(env, t, id, token, result, "send"));
+		if (result.pending || result.unknown) {
+			/* 結果がまだ分からない（遅いだけ／種類の分からない例外）。その場では送り直さない */
+			if (result.pending) background(ctx, settleLater(env, t, id, token, result, "send"));
+			else await finishRecord(env, t, id, token, result, deadline); /* failed にしておけば定期処理が送り直す */
 			if (id != null) {
-				console.log("contact", "send", id, "ACCEPTED_PENDING");
-				return success(wantsJson, id); /* 控えがあるので、届かなくても定期処理が送り直す */
+				console.log("contact", "send", id, result.pending ? "ACCEPTED_PENDING" : "ACCEPTED_UNKNOWN");
+				return success(wantsJson, id); /* 控えがあるので、届いていなくても定期処理が送り直す */
 			}
-			log("send", null, "PENDING_NO_RECORD");
-			return failure(wantsJson, 502, "送信できませんでした。"); /* 控えが無い＝保証できないので正直に返す */
+			log("send", null, "UNSURE_NO_RECORD");
+			return failure(wantsJson, 502, "送信結果を確認できませんでした。届いている可能性があります。"); /* 控えが無い＝保証できない */
 		}
 		await finishRecord(env, t, id, token, result, deadline);
 
@@ -414,7 +423,7 @@ async function rescue(env, t, ctx) {
 			if (!(await finishRecord(env, t, row.id, token, { ok: false, attempts: 0, code: "BAD_DATA", detail: "BAD_DATA" }, Date.now() + t.d1Ms, true))) dbTrouble = true;
 			continue;
 		}
-		const deadline = Date.now() + t.deadlineMs;
+		const deadline = Date.now() + t.rescueSendMs + t.d1Ms;
 		const result = await sendMail(
 			env,
 			t,
@@ -422,8 +431,9 @@ async function rescue(env, t, ctx) {
 			deadline - t.d1Ms
 		);
 		if (result.pending) {
-			/* 送信がまだ終わっていない。送り直さず、結果を裏で見届けて記録する（札はそのまま＝ほかの処理は触らない） */
-			background(ctx, settleLater(env, t, row.id, token, result, "rescue"));
+			/* まだ終わらない。送り直さず、この場でさらに見届けて記録する（札の期限90秒の内側。記録に失敗したら正常終了にしない） */
+			const recorded = await settleLater(env, t, row.id, token, result, "rescue");
+			if (recorded === false) dbTrouble = true;
 			continue;
 		}
 		if (!(await finishRecord(env, t, row.id, token, result, deadline))) dbTrouble = true;
@@ -585,10 +595,14 @@ async function sendMail(env, t, m, deadline) {
 			detail = (code + ": " + ((e && e.message) || "")).slice(0, 300);
 			log("send-attempt", m.id, code + " #" + attempts);
 			if (mail.replyTo && REPLYTO_SUSPECT.has(code)) {
-				withReplyTo = false;
+				withReplyTo = false; /* 中身の検査で弾かれた＝送られていない。返信先を外して送り直す */
 				continue;
 			}
-			if (NO_RETRY.has(code)) break;
+			if (NO_RETRY.has(code)) break; /* 送れなかったことがはっきりしている */
+			if (!RETRYABLE.has(code)) {
+				/* 種類の分からない例外＝送れたかどうか分からない。その場では送り直さない */
+				return { ok: false, unknown: true, attempts, code, detail };
+			}
 			const wait = Math.min(attempts * t.backoffMs, deadline - Date.now() - 500);
 			if (wait > 0) await sleep(wait);
 		}
@@ -596,7 +610,7 @@ async function sendMail(env, t, m, deadline) {
 	return { ok: false, attempts, code: code || "NO_TIME", detail: detail || "NO_TIME" };
 }
 
-/* 時間内に終わらなかった送信の結果を、返事のあとで見届けて記録する */
+/* 時間内に終わらなかった送信の結果を見届けて記録する。記録できたら true・記録に失敗したら false・まだ終わらなければ null */
 async function settleLater(env, t, id, token, r, stage) {
 	let final;
 	try {
@@ -608,12 +622,12 @@ async function settleLater(env, t, id, token, r, stage) {
 		if (code === "TIMEOUT") {
 			/* まだ終わらない。札の期限が切れたあと、定期処理が拾う（届いていれば二重になることがある＝取りこぼしよりまし） */
 			log(stage + "-late", id, "STILL_PENDING");
-			return;
+			return null;
 		}
 		log(stage + "-late", id, "FAILED:" + code);
 		final = { ok: false, attempts: r.attempts, code, detail: (code + ": " + ((e && e.message) || "")).slice(0, 300) };
 	}
-	await finishRecord(env, t, id, token, final, Date.now() + t.d1Ms);
+	return await finishRecord(env, t, id, token, final, Date.now() + t.d1Ms);
 }
 
 /* 返事のあとも処理を続ける（Workers の waitUntil）。使えないとき（テスト等）は失敗を握りつぶすだけ */
