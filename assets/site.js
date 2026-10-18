@@ -60,7 +60,7 @@
 		start();
 	}
 
-	/* お問い合わせフォーム（FormSubmit へ AJAX 送信。JS無効時は通常POST→_next へ） */
+	/* お問い合わせフォーム（自前の受け口 /api/contact へ AJAX 送信。JS無効時は通常POST→受け口が完了表示へ戻す） */
 	var form = document.getElementById("contactForm");
 	var done = document.getElementById("formDone");
 	if (form && done) {
@@ -142,7 +142,7 @@
 			});
 		}
 
-		/* AJAX送信に必要なAPIが無い古いブラウザは、標準検証のまま通常POST（_next で戻る） */
+		/* AJAX送信に必要なAPIが無い古いブラウザは、標準検証のまま通常POST（受け口が完了表示へ戻す） */
 		var canAjax = typeof window.fetch === "function" && typeof window.FormData === "function" &&
 			typeof window.FormData.prototype.forEach === "function";
 
@@ -157,19 +157,16 @@
 				showError("未入力の項目があります。「必須」の項目をご記入ください。");
 				return;
 			}
-			if (form._honey && form._honey.value) return; /* bot */
+			/* 隠し欄（_honey）の判定は受け口に任せる（ここで黙って止めると、自動入力で誤判定された人の問い合わせが消える） */
 
+			/* 件名・返信先は受け口がつける。ここでは入力内容をそのまま送る */
 			var data = {};
 			new FormData(form).forEach(function (v, k) { data[k] = v; });
-			delete data._next;
-			var contact = data["ご連絡先（電話番号またはメールアドレス）"] || "";
-			if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact.trim())) data._replyto = contact.trim();
-			data._subject = "【ホームページ】体験レッスンのお申し込み：" + (data["お名前"] || "").trim() + " 様";
 
 			submitBtn.disabled = true;
 			submitBtn.textContent = "送信中…";
 
-			var endpoint = form.action.replace("formsubmit.co/", "formsubmit.co/ajax/");
+			var endpoint = form.action;
 			var ctrl = ("AbortController" in window) ? new AbortController() : null;
 			var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, 15000) : null;
 			fetch(endpoint, {

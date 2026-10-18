@@ -329,12 +329,9 @@
 				</p>
 
 				<span id="contact-sent" aria-hidden="true"></span>
-				<form class="contact-form reveal" id="contactForm" action="https://formsubmit.co/piano.kyoshitsu.75@gmail.com" method="POST">
-					<!-- FormSubmit 設定（送信先はこのフォームのaction。JS有効時はAJAXで送信） -->
-					<input type="hidden" name="_subject" value="【ホームページ】体験レッスンのお申し込み" />
-					<input type="hidden" name="_template" value="table" />
-					<input type="hidden" name="_captcha" value="false" />
-					<input type="hidden" name="_next" value="https://nanakopiano.com/?sent=1#contact-sent" />
+				<form class="contact-form reveal" id="contactForm" action="/api/contact" method="POST">
+					<!-- 送信先＝自前の受け口（functions/api/contact.js → contact-worker）。教室のGmailへメールで届き、控えも残る。
+					     JS有効時はAJAXで送信、JS無効時は通常POST→完了表示（/?sent=1）へ戻る -->
 					<input type="text" name="_honey" class="hp-field" tabindex="-1" autocomplete="off" aria-hidden="true" />
 
 					<div class="form-grid">
@@ -411,6 +408,6 @@
 		<a href="#contact" class="mcta-mail">体験レッスン（無料）</a>
 	</div>
 
-	<script src="assets/site.js?v=5" defer></script>
+	<script src="assets/site.js?v=6" defer></script>
 	</body>
 </html>
