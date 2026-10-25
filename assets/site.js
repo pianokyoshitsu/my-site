@@ -66,7 +66,26 @@
 	if (form && done) {
 		var errBox = document.getElementById("formError");
 		var submitBtn = document.getElementById("formSubmit");
-		var fallbackHtml = "お手数ですが、<a href=\"tel:05013821090\">お電話（050-1382-1090）</a>または<a href=\"mailto:piano.kyoshitsu.75@gmail.com\">メール</a>でご連絡ください。";
+		/* 案内文は語の途中で折り返さないよう、「|」で区切ったひとまとまりずつ .ph で包み、まとまりの間でだけ改行する。
+		   「^」はまとまりの中の予備の切れ目（文字を大きくした狭い画面で、まとまりが1行に入らないときだけ使われる） */
+		var phr = function (s) {
+			return s.split("|").map(function (t) { return '<span class="ph">' + t.split("^").join("<wbr>") + "</span>"; }).join("<wbr>");
+		};
+		var fallbackHtml = phr("お手数ですが、") + '<wbr><span class="ph"><a href="tel:05013821090">お電話（050-1382-1090）</a></span><wbr>' +
+			phr('または<a href="mailto:piano.kyoshitsu.75@gmail.com">メール</a>で|ご連絡ください。');
+		/* 受け口が返す決まった文は、文節の切れ目（|）を入れて表示する。知らない文はブラウザの文節判定（対応ブラウザのみ）に任せる */
+		var PHRASES = {
+			"送信内容が大きすぎて受け付けられませんでした。": "送信内容が|大きすぎて|受け付けられ^ませんでした。",
+			"通信に時間がかかり、送信できませんでした。": "通信に時間がかかり、|送信^できませんでした。",
+			"送信内容を読み取れませんでした。": "送信内容を|読み取れ^ませんでした。",
+			"入力された内容がありませんでした。": "入力された内容が|ありませんでした。",
+			"送信結果を確認できませんでした。": "送信結果を|確認^できませんでした。",
+			"届いている可能性があります。": "届いている|可能性があります。",
+			"送信できませんでした。": "送信^できませんでした。"
+		};
+		var sentenceHtml = function (s) {
+			return Object.prototype.hasOwnProperty.call(PHRASES, s) ? phr(PHRASES[s]) : '<span class="wb-auto">' + s + "</span>";
+		};
 
 		/* チラシのQR（#contactForm）から来たら、読み込み完了後に確実にフォームへ着地させる
 		   （ブラウザ標準のアンカー移動は、フォントや画像の読み込みで位置がずれたり効かなかったりするため） */
@@ -166,18 +185,19 @@
 				var badEmail = bad.some(function (el) { return el.type === "email"; });
 				if (firstMissing || bad[0]) (firstMissing || bad[0]).focus();
 				/* 語の途中で折り返さないよう、ひと塊（.ph）ずつ包む */
-				var telHint = '<span class="ph">（例：090-1234-5678）</span>';
-				var emailHint = '<span class="ph">（例：example@gmail.com）</span>';
+				var telHint = phr("（例：090-1234-5678）");
+				var emailHint = phr("（例：example@gmail.com）");
+				var missingMsg = phr("未入力の^項目があります。") + "<br />" + phr("「必須」の項目を|ご記入^ください。");
 				if (firstMissing) {
-					showError('<span class="ph">未入力の項目があります。</span><br /><span class="ph">「必須」の項目を</span><span class="ph">ご記入ください。</span>');
+					showError(missingMsg);
 				} else if (badTel && badEmail) {
-					showError('<span class="ph">電話番号と</span><span class="ph">メールアドレスの</span><span class="ph">書き方を</span><span class="ph">ご確認ください。</span><br />' + telHint + '<br />' + emailHint);
+					showError(phr("電話番号と|メールアドレスの|書き方を|ご確認^ください。") + "<br />" + telHint + "<br />" + emailHint);
 				} else if (badTel) {
-					showError('<span class="ph">電話番号は市外局番から、</span><span class="ph">数字でご記入ください。</span><br />' + telHint);
+					showError(phr("電話番号は^市外局番から、|数字で^ご記入ください。") + "<br />" + telHint);
 				} else if (badEmail) {
-					showError('<span class="ph">メールアドレスの</span><span class="ph">書き方をご確認ください。</span><br />' + emailHint);
+					showError(phr("メールアドレスの|書き方を^ご確認ください。") + "<br />" + emailHint);
 				} else {
-					showError('<span class="ph">未入力の項目があります。</span><br /><span class="ph">「必須」の項目を</span><span class="ph">ご記入ください。</span>');
+					showError(missingMsg);
 				}
 				return;
 			}
@@ -206,13 +226,14 @@
 					/* 受け口が返した文言（「送信できませんでした」「結果を確認できませんでした」等）を出す。文字としてだけ扱う */
 					var msg = (res && typeof res.message === "string" && res.message) ? res.message : "送信できませんでした。";
 					var safe = msg.replace(/[&<>"']/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[c]; });
-					showError(safe.replace(/。(?=.)/g, "。<br />"), true); /* 文の切れ目で改行（スマホで語の途中で折り返さない） */
+					/* 文の切れ目で改行し、文の中は文節の切れ目でだけ折り返す */
+					showError((safe.match(/[^。]*。+|[^。]+/g) || [safe]).map(sentenceHtml).join("<br />"), true);
 				}
 			}).catch(function (err) {
 				if (timer) clearTimeout(timer);
 				showError((err && err.name === "AbortError")
-					? "送信結果を確認できませんでした（時間切れ）。すでに受け付けられている可能性があります。"
-					: "通信が途切れ、送信結果を確認できませんでした。すでに受け付けられている可能性があります。", true);
+					? phr("送信結果を|確認^できませんでした|（時間切れ）。") + "<br />" + phr("すでに^受け付けられている|可能性があります。")
+					: phr("通信が途切れ、|送信結果を|確認^できませんでした。") + "<br />" + phr("すでに^受け付けられている|可能性があります。"), true);
 			});
 		});
 		/* ハンドラー登録後にブラウザ標準の検証を止める（AJAXできる環境だけ。JS無効・旧ブラウザは標準の必須検証が生きる） */

@@ -34,7 +34,19 @@ body{
 	font-feature-settings: "palt";
 	-webkit-font-smoothing: antialiased;
 	overflow-x: hidden;
+	/* 日本語は、HTMLに入れた切れ目（<wbr>）と空白・.ph の境目でだけ折り返す。入りきらないときだけ語の途中で折る
+	   （Safari・Firefox も同じ見え方になるよう、word-break:auto-phrase ではなく <wbr> で切れ目を指定している。
+	    Safari は句読点の後ろでも折らない版があるので、文言を足すときは「、」「。」「（」の前後にも <wbr> を入れる） */
+	word-break: keep-all;
+	overflow-wrap: break-word;
 }
+/* 入力欄の中（お客さまが打つ文字）は従来どおりの折り返し */
+input, textarea{ word-break: normal; }
+/* ひとまとまり（句・節・「／」付きの語・かっこ付きの語など）：前の行の残りに入らなければ丸ごと次の行へ。
+   1行に入らないとき（文字を大きくした画面など）だけ中で折る（max-width で枠からはみ出さない） */
+.ph{ display: inline-block; max-width: 100%; }
+/* 切れ目を指定できない文（受け口から届く想定外の文言）は、ブラウザの文節判定に任せる（未対応のブラウザは通常の折り返し） */
+.wb-auto{ word-break: normal; word-break: auto-phrase; }
 img{ max-width: 100%; height: auto; display: block; }
 a{ color: var(--rose); }
 section{ scroll-margin-top: calc(var(--header-h) + 8px); }
@@ -69,7 +81,9 @@ h3{ font-size: 1.06rem; margin: 0 0 .3em; }
 	font-size: .82rem; letter-spacing: .28em; text-transform: uppercase;
 }
 .eyebrow.center{ justify-content: center; }
-.eyebrow .en{ font-family: var(--en); font-style: italic; font-size: 1.35em; letter-spacing: .18em; }
+/* 1行に入らない狭い画面（幅330px前後以下）では「Piano Lesson」を割らず、地名を次の行へ送る */
+.eyebrow{ flex-wrap: wrap; }
+.eyebrow .en{ font-family: var(--en); font-style: italic; font-size: 1.35em; letter-spacing: .18em; white-space: nowrap; }
 .eyebrow .num{
 	font-family: var(--en); font-style: italic; font-size: 1.9em;
 	color: var(--rose); opacity: .85; line-height: 1;
@@ -286,7 +300,7 @@ h3{ font-size: 1.06rem; margin: 0 0 .3em; }
 }
 .price-body{ padding: 2rem clamp(1.4rem, 4vw, 2.6rem) 2.2rem; }
 .price-plan{ text-align: center; font-size: 1.12rem; margin-bottom: 1.2rem; }
-.price-plan .plan-note{ font-size: .8em; color: var(--ink-soft); font-weight: 400; margin-left: .3em; }
+.price-plan .plan-note{ font-size: .8em; color: var(--ink-soft); font-weight: 400; margin-left: .3em; display: inline-block; max-width: 100%; } /* 「（30分／月4回）」をひとまとまりで折り返す */
 .price-rows{ margin: 0 0 1.2rem; }
 .price-row{
 	display: flex; align-items: baseline; justify-content: space-between;
@@ -427,8 +441,6 @@ h3{ font-size: 1.06rem; margin: 0 0 .3em; }
 .form-actions .btn{ border: 0; cursor: pointer; font: inherit; font-weight: 500; letter-spacing: .12em; }
 .form-actions .btn[disabled]{ opacity: .6; cursor: default; transform: none; }
 .form-privacy{ margin: 0; text-align: center; font-size: .78rem; color: var(--ink-soft); line-height: 1.7; }
-/* 語の途中で折り返さない：文節ごとにまとめ、文節の間でだけ改行する */
-.form-privacy .ph, .form-error .ph{ display: inline-block; }
 .form-error{
 	margin: 1.2rem 0 0; padding: .8em 1em; border-radius: 12px; font-size: .86rem; line-height: 1.8;
 	background: #fdeeee; color: #8e3a4d; border: 1px solid #f0c6cc;
