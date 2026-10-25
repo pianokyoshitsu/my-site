@@ -108,7 +108,8 @@ const SAMPLE = {
 	"お名前": "テスト 花子",
 	"年齢（レッスンを受ける方）": "7歳",
 	"性別": "女性",
-	"ご連絡先（電話番号またはメールアドレス）": "parent@example.com",
+	"電話番号": "090-1234-5678",
+	"メールアドレス": "parent@example.com",
 	"ご連絡のつきやすい時間帯": "平日18時以降",
 	"ご質問・ご要望など": "発表会について知りたいです。\n送迎の都合で平日夕方が希望です。",
 	"きっかけ": "チラシのQRコード（ごあいさつ版）",
@@ -166,6 +167,8 @@ test("JSなしの通常送信：303で完了ページへ", async () => {
 	assert.equal(res.status, 303);
 	assert.equal(res.headers.get("Location"), "https://nanakopiano.com/?sent=1#contact-sent");
 	assert.ok(EMAIL.sent[0].text.includes("■ ご質問・ご要望など\n発表会について知りたいです。\n送迎の都合で平日夕方が希望です。"));
+	assert.equal(EMAIL.sent[0].replyTo, "parent@example.com"); /* 2欄のメールアドレスから返信先が付く */
+	assert.ok(EMAIL.sent[0].text.includes("■ 電話番号\n090-1234-5678"));
 });
 
 test("multipart形式でも届く", async () => {
@@ -201,18 +204,50 @@ test("知らない項目も後ろに付けて届ける", async () => {
 	assert.ok(t.indexOf("■ きっかけ") < t.indexOf("■ 希望の曜日\n土曜"));
 });
 
-test("連絡先が電話番号：replyTo なし・本文に連絡先の案内", async () => {
+test("電話番号とメールアドレスの両方：返信先はメール・両方とも本文に載る", async () => {
 	const DB = makeD1(), EMAIL = makeEmail();
-	await worker.fetch(jsonReq({ ...SAMPLE, "ご連絡先（電話番号またはメールアドレス）": "090-1234-5678" }), env(DB, EMAIL));
+	await worker.fetch(jsonReq(SAMPLE), env(DB, EMAIL));
+	const m = EMAIL.sent[0];
+	assert.equal(m.replyTo, "parent@example.com");
+	assert.ok(m.text.includes("■ 電話番号\n090-1234-5678"));
+	assert.ok(m.text.includes("■ メールアドレス\nparent@example.com"));
+	assert.ok(m.text.includes("このメールに返信すると、ご記入のメールアドレス（parent@example.com）に届きます。"));
+});
+
+test("メールアドレスが無い：replyTo なし・本文に電話番号の案内", async () => {
+	const DB = makeD1(), EMAIL = makeEmail();
+	await worker.fetch(jsonReq({ ...SAMPLE, "メールアドレス": "" }), env(DB, EMAIL));
 	assert.equal(EMAIL.sent[0].replyTo, undefined);
 	assert.ok(EMAIL.sent[0].text.includes("お返事は、ご記入のご連絡先（090-1234-5678）へお願いします。"));
 });
 
-test("全角の句点が付いたアドレスなど怪しい形は replyTo にしない（本文には残す）", async () => {
+test("全角の句点が付いたアドレスなど怪しい形は replyTo にしない（本文には残す・案内は電話番号）", async () => {
 	const DB = makeD1(), EMAIL = makeEmail();
-	await worker.fetch(jsonReq({ ...SAMPLE, "ご連絡先（電話番号またはメールアドレス）": "parent@example.com。" }), env(DB, EMAIL));
+	await worker.fetch(jsonReq({ ...SAMPLE, "メールアドレス": "parent@example.com。" }), env(DB, EMAIL));
 	assert.equal(EMAIL.sent[0].replyTo, undefined);
 	assert.ok(EMAIL.sent[0].text.includes("parent@example.com。"));
+	assert.ok(EMAIL.sent[0].text.includes("お返事は、ご記入のご連絡先（090-1234-5678）へお願いします。"));
+});
+
+/* 2欄に分ける前のページ（ご連絡先＝1欄）を開いたままの人から届いた場合 */
+const OLD_SAMPLE = { ...SAMPLE };
+delete OLD_SAMPLE["電話番号"];
+delete OLD_SAMPLE["メールアドレス"];
+
+test("古いページの1欄（メールアドレス）：返信先にする・項目の順番は保つ", async () => {
+	const DB = makeD1(), EMAIL = makeEmail();
+	await worker.fetch(jsonReq({ ...OLD_SAMPLE, "ご連絡先（電話番号またはメールアドレス）": "parent@example.com" }), env(DB, EMAIL));
+	const t = EMAIL.sent[0].text;
+	assert.equal(EMAIL.sent[0].replyTo, "parent@example.com");
+	assert.ok(t.indexOf("■ 性別") < t.indexOf("■ ご連絡先（電話番号またはメールアドレス）\nparent@example.com"));
+	assert.ok(t.indexOf("■ ご連絡先（電話番号またはメールアドレス）") < t.indexOf("■ ご連絡のつきやすい時間帯"));
+});
+
+test("古いページの1欄（電話番号）：replyTo なし・本文に連絡先の案内", async () => {
+	const DB = makeD1(), EMAIL = makeEmail();
+	await worker.fetch(jsonReq({ ...OLD_SAMPLE, "ご連絡先（電話番号またはメールアドレス）": "090-1234-5678" }), env(DB, EMAIL));
+	assert.equal(EMAIL.sent[0].replyTo, undefined);
+	assert.ok(EMAIL.sent[0].text.includes("お返事は、ご記入のご連絡先（090-1234-5678）へお願いします。"));
 });
 
 test("返信先が原因のエラー：返信先を外して送り直し、届く", async () => {
@@ -249,7 +284,7 @@ test("最後まで送れない：502・控えは failed で全文が残る・mai
 
 test("設定の問題（送り直しても無駄）は1回で止めて失敗を返す", async () => {
 	const DB = makeD1(), EMAIL = makeEmail(["E_RECIPIENT_NOT_ALLOWED"]);
-	const res = await worker.fetch(jsonReq({ ...SAMPLE, "ご連絡先（電話番号またはメールアドレス）": "090-1" }), env(DB, EMAIL));
+	const res = await worker.fetch(jsonReq({ ...SAMPLE, "メールアドレス": "090-1" }), env(DB, EMAIL));
 	assert.equal(res.status, 502);
 	assert.equal(EMAIL.calls, 1);
 });
@@ -334,7 +369,7 @@ test("D1 が壊れていてもメールは届く（受付番号は載せない�
 
 test("JSなしでメール失敗：電話・メール案内のページ", async () => {
 	const DB = makeD1(), EMAIL = makeEmail(["E_RECIPIENT_NOT_ALLOWED"]);
-	const res = await worker.fetch(formReq({ ...SAMPLE, "ご連絡先（電話番号またはメールアドレス）": "090" }), env(DB, EMAIL));
+	const res = await worker.fetch(formReq({ ...SAMPLE, "メールアドレス": "090" }), env(DB, EMAIL));
 	assert.equal(res.status, 502);
 	const html = await res.text();
 	assert.ok(html.includes("050-1382-1090") && html.includes("mailto:piano.kyoshitsu.75@gmail.com"));
@@ -403,7 +438,13 @@ test("件名に改行を入れられない・名前未記入でも崩れない",
 
 test("連絡先にヘッダー注入ねらいの改行：replyTo にしない", async () => {
 	const EMAIL = makeEmail();
-	await worker.fetch(jsonReq({ ...SAMPLE, "ご連絡先（電話番号またはメールアドレス）": "a@b.com\nBcc: x@y.com" }), env(makeD1(), EMAIL));
+	await worker.fetch(jsonReq({ ...SAMPLE, "メールアドレス": "a@b.com\nBcc: x@y.com" }), env(makeD1(), EMAIL));
+	assert.equal(EMAIL.sent[0].replyTo, undefined);
+});
+
+test("古いページの1欄にヘッダー注入ねらいの改行：replyTo にしない", async () => {
+	const EMAIL = makeEmail();
+	await worker.fetch(jsonReq({ ...OLD_SAMPLE, "ご連絡先（電話番号またはメールアドレス）": "a@b.com\nBcc: x@y.com" }), env(makeD1(), EMAIL));
 	assert.equal(EMAIL.sent[0].replyTo, undefined);
 });
 
@@ -762,7 +803,7 @@ test("種類の分からない例外（控えなし）：「結果を確認で�
 
 test("1日の上限（E_DAILY_LIMIT_EXCEEDED）はその場で送り直さず失敗を返す", async () => {
 	const DB = makeD1(), EMAIL = makeEmail(["E_DAILY_LIMIT_EXCEEDED"]);
-	const res = await worker.fetch(jsonReq({ ...SAMPLE, "ご連絡先（電話番号またはメールアドレス）": "090" }), env(DB, EMAIL));
+	const res = await worker.fetch(jsonReq({ ...SAMPLE, "メールアドレス": "090" }), env(DB, EMAIL));
 	assert.equal(res.status, 502);
 	assert.equal(EMAIL.calls, 1);
 	assert.equal(DB.rows()[0].mail_status, "failed");
@@ -793,6 +834,7 @@ test("ログにお客さまのアドレスや入力内容が出ていない", as
 	const joined = logs.join("\n");
 	assert.ok(!joined.includes("parent@example.com"), "アドレスが出ていない");
 	assert.ok(!joined.includes("テスト 花子"), "名前が出ていない");
+	assert.ok(!joined.includes("090-1234-5678"), "電話番号が出ていない");
 	assert.ok(logs.length > 0, "ログ自体は出ている");
 });
 

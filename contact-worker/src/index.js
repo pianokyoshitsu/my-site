@@ -39,13 +39,18 @@ const KNOWN_FIELDS = [
 	"お名前",
 	"年齢（レッスンを受ける方）",
 	"性別",
+	"電話番号",
+	"メールアドレス",
 	"ご連絡先（電話番号またはメールアドレス）",
 	"ご連絡のつきやすい時間帯",
 	"ご質問・ご要望など",
 	"きっかけ",
 ];
 const NAME_FIELD = "お名前";
-const CONTACT_FIELD = "ご連絡先（電話番号またはメールアドレス）";
+const PHONE_FIELD = "電話番号";
+const EMAIL_FIELD = "メールアドレス";
+/* 2026-10-25 に電話番号・メールアドレスの2欄へ分けるまでの1欄。開いたままの古いページから届いたときのために残す */
+const OLD_CONTACT_FIELD = "ご連絡先（電話番号またはメールアドレス）";
 const HONEYPOT = "_honey";
 
 /* 受け付ける送信の大きさ。日本語は送信時に最大9倍ほどに膨らむので、長文でも十分入る大きさにしてある */
@@ -512,8 +517,9 @@ const EMAIL_RE = /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[
 function buildMail(m, withReplyTo) {
 	const get = (k) => (m.fields.find(([key]) => key === k) || [])[1] || "";
 	const name = cleanText(get(NAME_FIELD), false).slice(0, 40);
-	const contact = get(CONTACT_FIELD).trim();
-	const replyTo = withReplyTo && contact.length <= 254 && EMAIL_RE.test(contact) ? contact : null;
+	const email = (get(EMAIL_FIELD) || get(OLD_CONTACT_FIELD)).trim();
+	const replyTo = withReplyTo && email.length <= 254 && EMAIL_RE.test(email) ? email : null;
+	const contact = get(PHONE_FIELD).trim() || email;
 
 	const lines = [];
 	if (m.resend) {
