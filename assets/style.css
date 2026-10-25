@@ -513,4 +513,6 @@ h3{ font-size: 1.06rem; margin: 0 0 .3em; }
 	.brand-name{ font-size: .84rem; }
 	.header-cta{ font-size: .76rem; padding: .4em .85em; }
 	.btn-big{ font-size: .86rem; letter-spacing: .04em; }
+	/* 例文を幅320pxの欄（中身は約213px）に余裕をもって1行で収める（ご質問欄の例文は1行11字以内にしてある＝文字を大きくしている人の画面でも割れにくい） */
+	.field input::placeholder, .field textarea::placeholder{ letter-spacing: 0; }
 }
