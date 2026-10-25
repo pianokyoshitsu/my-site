@@ -391,7 +391,7 @@ h3{ font-size: 1.06rem; margin: 0 0 .3em; }
 }
 .req{ background: var(--rose); color: #fff; }
 .opt{ background: var(--blush); color: var(--ink-soft); }
-.field input[type="text"], .field textarea{
+.field input[type="text"], .field input[type="tel"], .field input[type="email"], .field textarea{
 	font: inherit; font-size: 16px; line-height: 1.6; letter-spacing: .03em; color: var(--ink);
 	background: #fff; border: 1px solid var(--line); border-radius: 12px;
 	padding: .7em .95em; width: 100%; min-width: 0;
@@ -403,7 +403,7 @@ h3{ font-size: 1.06rem; margin: 0 0 .3em; }
 	outline: none; border-color: var(--rose);
 	box-shadow: 0 0 0 4px rgba(168, 70, 92, .14);
 }
-.contact-form.was-validated .field input[type="text"]:invalid, .contact-form.was-validated .field textarea:invalid{ border-color: var(--rose-deep); background: #fff7f7; }
+.contact-form.was-validated .field input[type="text"]:invalid, .contact-form.was-validated .field input[type="tel"]:invalid, .contact-form.was-validated .field input[type="email"]:invalid, .contact-form.was-validated .field textarea:invalid{ border-color: var(--rose-deep); background: #fff7f7; }
 .field-hint{ margin: 0; font-size: .78rem; color: var(--ink-soft); line-height: 1.7; }
 .radio-row{ display: flex; flex-wrap: wrap; gap: .6rem; }
 .radio{
@@ -428,7 +428,7 @@ h3{ font-size: 1.06rem; margin: 0 0 .3em; }
 .form-actions .btn[disabled]{ opacity: .6; cursor: default; transform: none; }
 .form-privacy{ margin: 0; text-align: center; font-size: .78rem; color: var(--ink-soft); line-height: 1.7; }
 /* 語の途中で折り返さない：文節ごとにまとめ、文節の間でだけ改行する */
-.form-privacy .ph{ display: inline-block; }
+.form-privacy .ph, .form-error .ph{ display: inline-block; }
 .form-error{
 	margin: 1.2rem 0 0; padding: .8em 1em; border-radius: 12px; font-size: .86rem; line-height: 1.8;
 	background: #fdeeee; color: #8e3a4d; border: 1px solid #f0c6cc;

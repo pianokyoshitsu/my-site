@@ -151,10 +151,34 @@
 			ev.preventDefault();
 			errBox.hidden = true;
 			form.classList.add("was-validated");
+			/* メール欄の全角英数字・記号は半角にし、空白（全角も）は取り除く（日本語入力のまま打った人が先へ進めなくならないように） */
+			var emailInput = form.querySelector('input[type="email"]');
+			if (emailInput) {
+				emailInput.value = emailInput.value
+					.replace(/[！-～]/g, function (c) { return String.fromCharCode(c.charCodeAt(0) - 0xFEE0); })
+					.replace(/[\s　]/g, "");
+			}
 			if (!form.checkValidity()) {
-				var firstBad = form.querySelector("input:invalid, select:invalid, textarea:invalid");
-				if (firstBad) firstBad.focus();
-				showError("未入力の項目があります。「必須」の項目をご記入ください。");
+				var bad = Array.prototype.slice.call(form.querySelectorAll("input:invalid, select:invalid, textarea:invalid"));
+				/* 未入力（空白だけを含む）があれば先にそれを知らせ、そこへカーソルを移す。全部埋まっていて電話・メールの書き方だけが違うときは、その欄の書き方を案内する */
+				var firstMissing = bad.filter(function (el) { return el.validity.valueMissing || !el.value.trim(); })[0];
+				var badTel = bad.some(function (el) { return el.type === "tel"; });
+				var badEmail = bad.some(function (el) { return el.type === "email"; });
+				if (firstMissing || bad[0]) (firstMissing || bad[0]).focus();
+				/* 語の途中で折り返さないよう、ひと塊（.ph）ずつ包む */
+				var telHint = '<span class="ph">（例：090-1234-5678）</span>';
+				var emailHint = '<span class="ph">（例：example@gmail.com）</span>';
+				if (firstMissing) {
+					showError('<span class="ph">未入力の項目があります。</span><br /><span class="ph">「必須」の項目を</span><span class="ph">ご記入ください。</span>');
+				} else if (badTel && badEmail) {
+					showError('<span class="ph">電話番号と</span><span class="ph">メールアドレスの</span><span class="ph">書き方を</span><span class="ph">ご確認ください。</span><br />' + telHint + '<br />' + emailHint);
+				} else if (badTel) {
+					showError('<span class="ph">電話番号は市外局番から、</span><span class="ph">数字でご記入ください。</span><br />' + telHint);
+				} else if (badEmail) {
+					showError('<span class="ph">メールアドレスの</span><span class="ph">書き方をご確認ください。</span><br />' + emailHint);
+				} else {
+					showError('<span class="ph">未入力の項目があります。</span><br /><span class="ph">「必須」の項目を</span><span class="ph">ご記入ください。</span>');
+				}
 				return;
 			}
 			/* 隠し欄（_honey）の判定は受け口に任せる（ここで黙って止めると、自動入力で誤判定された人の問い合わせが消える） */
